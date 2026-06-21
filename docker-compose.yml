@@ -1,0 +1,30 @@
+services:
+  whatsapp-api:
+    build: .
+    container_name: whatsapp-api-gateway
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      KEYCLOAK_AUTH_SERVER_URL: ${KEYCLOAK_AUTH_SERVER_URL}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE}
+      WHATSAPP_CLIENT_ID: ${WHATSAPP_CLIENT_ID:-default}
+      WHATSAPP_SESSION_PATH: /app/data/sessions
+      WHATSAPP_MESSAGE_DELAY_MS: ${WHATSAPP_MESSAGE_DELAY_MS:-3000}
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
+      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+    volumes:
+      # Persists the LocalAuth session across restarts.
+      - whatsapp-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  whatsapp-data:

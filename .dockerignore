@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+.wwebjs_cache
+obj
+bin
+src/generated
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+README.md

@@ -1,0 +1,24 @@
+{
+  "entryFile": "src/server.ts",
+  "noImplicitAdditionalProperties": "throw-on-extras",
+  "controllerPathGlobs": ["src/controllers/**/*.ts"],
+  "spec": {
+    "outputDirectory": "src/generated",
+    "specVersion": 3,
+    "name": "WhatsApp API Gateway",
+    "description": "REST gateway over whatsapp-web.js. All /messages endpoints require a valid Keycloak bearer token.",
+    "version": "1.0.0",
+    "securityDefinitions": {
+      "keycloak": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "routes": {
+    "routesDir": "src/generated",
+    "authenticationModule": "src/middleware/authentication.ts",
+    "iocModule": "src/ioc.ts"
+  }
+}

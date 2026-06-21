@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.VisualStudio.JavaScript.SDK/1.0.1184077">
+  <PropertyGroup>
+    <!-- Command run when the project is launched (F5 / Debug). -->
+    <StartupCommand>npm run dev</StartupCommand>
+
+    <!-- Run `npm run build` (tsoa spec-and-routes && tsc) on Visual Studio build. -->
+    <ShouldRunBuildScript>true</ShouldRunBuildScript>
+    <BuildCommand>npm run build</BuildCommand>
+
+    <!-- Folder where compiled output is produced. -->
+    <BuildOutputFolder>$(MSBuildProjectDirectory)\dist</BuildOutputFolder>
+
+    <!-- Test integration (none configured yet). -->
+    <JavaScriptTestRoot>src\</JavaScriptTestRoot>
+    <JavaScriptTestFramework>Jest</JavaScriptTestFramework>
+  </PropertyGroup>
+</Project>
