@@ -15,20 +15,19 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: whatsapp-api-config
-  namespace: k2-system
+  namespace: {{NAMESPACE}}
   labels:
-    app.kubernetes.io/name: whatsapp-api
-    app.kubernetes.io/part-of: k2-system
+    app.kubernetes.io/name: {{SERVICE_NAME}}
 data:
   PORT: "3000"
   NODE_ENV: "production"
   # Base URL of Keycloak WITHOUT trailing slash and WITHOUT /realms.
-  KEYCLOAK_AUTH_SERVER_URL: "{{keycloak-base-url}}"
-  KEYCLOAK_REALM: "{{keycloak-realm}}"
+  KEYCLOAK_AUTH_SERVER_URL: "http://keycloak.infrastructure.svc.cluster.local:8080"
+  KEYCLOAK_REALM: "k2"
   # Expected token audience (client id). Empty -> audience check skipped.
-  KEYCLOAK_AUDIENCE: "{{keycloak-audience}}"
+  # KEYCLOAK_AUDIENCE: "{{keycloak-audience}}"
   # Sub-path the service is exposed under by the Ingress below.
-  PATH_BASE: "/whatsapp-api"
+  PATH_BASE: {{BASE_PATH}}
   WHATSAPP_CLIENT_ID: "default"
   WHATSAPP_SESSION_PATH: "/app/data/sessions"
   WHATSAPP_MESSAGE_DELAY_MS: "3000"
@@ -39,10 +38,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: whatsapp-data
-  namespace: k2-system
+  namespace: {{NAMESPACE}}
   labels:
-    app.kubernetes.io/name: whatsapp-api
-    app.kubernetes.io/part-of: k2-system
+    app.kubernetes.io/name: {{SERVICE_NAME}}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -54,11 +52,10 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: whatsapp-api
-  namespace: k2-system
+  name: {{SERVICE_NAME}}
+  namespace: {{NAMESPACE}}
   labels:
-    app.kubernetes.io/name: whatsapp-api
-    app.kubernetes.io/part-of: k2-system
+    app.kubernetes.io/name: {{SERVICE_NAME}}
 spec:
   replicas: 1
   strategy:
@@ -67,20 +64,19 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: whatsapp-api
+      app.kubernetes.io/name: {{SERVICE_NAME}}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: whatsapp-api
-        app.kubernetes.io/part-of: k2-system
+        app.kubernetes.io/name: {{SERVICE_NAME}}
     spec:
       securityContext:
         # node user (uid 1000) from the base image must own the mounted volume.
         fsGroup: 1000
       containers:
-        - name: whatsapp-api
+        - name: {{SERVICE_NAME}}
           # Built from this repo's Dockerfile and pushed to your registry.
-          image: "{{registry}}/k2-system/whatsapp-api:{{tag}}"
+          image: "{{REPOSITORY}}"
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -129,15 +125,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: whatsapp-api
-  namespace: k2-system
+  name: {{SERVICE_NAME}}
+  namespace: {{NAMESPACE}}
   labels:
-    app.kubernetes.io/name: whatsapp-api
-    app.kubernetes.io/part-of: k2-system
+    app.kubernetes.io/name: {{SERVICE_NAME}}
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: whatsapp-api
+    app.kubernetes.io/name: {{SERVICE_NAME}}
   ports:
     - name: http
       port: 3000
@@ -149,20 +144,19 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: whatsapp-api
-  namespace: k2-system
+  name: {{SERVICE_NAME}}
+  namespace: {{NAMESPACE}}
   labels:
-    app.kubernetes.io/name: whatsapp-api
-    app.kubernetes.io/part-of: k2-system
+    app.kubernetes.io/name: {{SERVICE_NAME}}
 spec:
   rules:
-    - host: "{{portal-host}}"
+    - host: "{{HOST}}"
       http:
         paths:
-          - path: /whatsapp-api
+          - path: {{BASE_PATH}}
             pathType: Prefix
             backend:
               service:
-                name: whatsapp-api
+                name: {{SERVICE_NAME}}
                 port:
                   number: 3000
