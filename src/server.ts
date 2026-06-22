@@ -1,3 +1,6 @@
+// MUST be first: starts the Elastic APM agent so it can instrument express,
+// http and other modules as they are required below.
+import './apm';
 import 'reflect-metadata';
 import { container } from 'tsyringe';
 
