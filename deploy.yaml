@@ -148,7 +148,12 @@ metadata:
   namespace: ${NAMESPACE}
   labels:
     app.kubernetes.io/name: ${SERVICE_NAME}
+    cert-manager.io/cluster-issuer: k2-intermediate-issuer
 spec:
+  tls:
+    - hosts:
+        - ${HOST}
+      secretName: ${SERVICE_NAME}-tls-secret
   rules:
     - host: "${HOST}"
       http:
