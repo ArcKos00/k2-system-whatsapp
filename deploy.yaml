@@ -20,13 +20,9 @@ metadata:
     app.kubernetes.io/name: ${SERVICE_NAME}
 data:
   PORT: "3000"
-  NODE_ENV: "production"
-  # Base URL of Keycloak WITHOUT trailing slash and WITHOUT /realms.
+  NODE_ENV: "production" 
   KEYCLOAK_AUTH_SERVER_URL: "http://keycloak.infrastructure.svc.cluster.local:8080"
   KEYCLOAK_REALM: "k2"
-  # Expected token audience (client id). Empty -> audience check skipped.
-  # KEYCLOAK_AUDIENCE: "{{keycloak-audience}}"
-  # Sub-path the service is exposed under by the Ingress below.
   PATH_BASE: ${BASE_PATH}
   WHATSAPP_CLIENT_ID: "default"
   WHATSAPP_SESSION_PATH: "/app/data/sessions"
