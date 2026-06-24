@@ -1,13 +1,5 @@
-# syntax=docker/dockerfile:1
-
-# Base image is built from Dockerfile.base and pushed to your own registry.
-# It already provides Node, Chromium, tini and the internal CA certificates.
-# Override at build time:
-#   docker build --build-arg BASE_IMAGE=registry.k2.lan/whatsapp/base:20 .
-ARG BASE_IMAGE=registry.k2.lan/whatsapp/base:20
-
 # ─── Build stage ───────────────────────────────────────────────
-FROM ${BASE_IMAGE} AS build
+FROM 10.20.50.25:8081/node/20-bookworm-slim AS build
 WORKDIR /app
 
 # Don't download Chromium during build — the base image provides it.
@@ -24,7 +16,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ─── Runtime stage ─────────────────────────────────────────────
-FROM ${BASE_IMAGE} AS runtime
+FROM 10.20.50.25:8081/node/20-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
