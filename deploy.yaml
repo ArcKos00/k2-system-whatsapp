@@ -146,6 +146,7 @@ metadata:
     app.kubernetes.io/name: ${SERVICE_NAME}
     cert-manager.io/cluster-issuer: k2-intermediate-issuer
 spec:
+  ingressClassName: haproxy
   tls:
     - hosts:
         - ${HOST}
