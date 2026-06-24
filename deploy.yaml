@@ -72,7 +72,7 @@ spec:
       containers:
         - name: ${SERVICE_NAME}
           # Built from this repo's Dockerfile and pushed to your registry.
-          image: "${REPOSITORY}"
+          image: "${REPOSITORY}":${IMAGE_TAG}
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
