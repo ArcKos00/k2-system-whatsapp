@@ -15,9 +15,9 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: whatsapp-api-config
-  namespace: {{NAMESPACE}}
+  namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: {{SERVICE_NAME}}
+    app.kubernetes.io/name: ${SERVICE_NAME}
 data:
   PORT: "3000"
   NODE_ENV: "production"
@@ -27,7 +27,7 @@ data:
   # Expected token audience (client id). Empty -> audience check skipped.
   # KEYCLOAK_AUDIENCE: "{{keycloak-audience}}"
   # Sub-path the service is exposed under by the Ingress below.
-  PATH_BASE: {{BASE_PATH}}
+  PATH_BASE: ${BASE_PATH}
   WHATSAPP_CLIENT_ID: "default"
   WHATSAPP_SESSION_PATH: "/app/data/sessions"
   WHATSAPP_MESSAGE_DELAY_MS: "3000"
@@ -38,9 +38,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: whatsapp-data
-  namespace: {{NAMESPACE}}
+  namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: {{SERVICE_NAME}}
+    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -52,10 +52,10 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{SERVICE_NAME}}
-  namespace: {{NAMESPACE}}
+  name: ${SERVICE_NAME}
+  namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: {{SERVICE_NAME}}
+    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   replicas: 1
   strategy:
@@ -64,19 +64,19 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{SERVICE_NAME}}
+      app.kubernetes.io/name: ${SERVICE_NAME}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{SERVICE_NAME}}
+        app.kubernetes.io/name: ${SERVICE_NAME}
     spec:
       securityContext:
         # node user (uid 1000) from the base image must own the mounted volume.
         fsGroup: 1000
       containers:
-        - name: {{SERVICE_NAME}}
+        - name: ${SERVICE_NAME}
           # Built from this repo's Dockerfile and pushed to your registry.
-          image: "{{REPOSITORY}}"
+          image: "${REPOSITORY}"
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -125,14 +125,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{SERVICE_NAME}}
-  namespace: {{NAMESPACE}}
+  name: ${SERVICE_NAME}
+  namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: {{SERVICE_NAME}}
+    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: {{SERVICE_NAME}}
+    app.kubernetes.io/name: ${SERVICE_NAME}
   ports:
     - name: http
       port: 3000
@@ -144,19 +144,19 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{SERVICE_NAME}}
-  namespace: {{NAMESPACE}}
+  name: ${SERVICE_NAME}
+  namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: {{SERVICE_NAME}}
+    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   rules:
-    - host: "{{HOST}}"
+    - host: "${HOST}"
       http:
         paths:
-          - path: {{BASE_PATH}}
+          - path: ${BASE_PATH}
             pathType: Prefix
             backend:
               service:
-                name: {{SERVICE_NAME}}
+                name: ${SERVICE_NAME}
                 port:
                   number: 3000
