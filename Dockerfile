@@ -1,10 +1,16 @@
 # syntax=docker/dockerfile:1
 
+# Base image is built from Dockerfile.base and pushed to your own registry.
+# It already provides Node, Chromium, tini and the internal CA certificates.
+# Override at build time:
+#   docker build --build-arg BASE_IMAGE=registry.k2.lan/whatsapp/base:20 .
+ARG BASE_IMAGE=registry.k2.lan/whatsapp/base:20
+
 # ─── Build stage ───────────────────────────────────────────────
-FROM node:20-bookworm-slim AS build
+FROM ${BASE_IMAGE} AS build
 WORKDIR /app
 
-# Don't download Chromium during build — runtime image provides it.
+# Don't download Chromium during build — the base image provides it.
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 COPY package*.json ./
@@ -18,28 +24,11 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ─── Runtime stage ─────────────────────────────────────────────
-FROM node:20-bookworm-slim AS runtime
+FROM ${BASE_IMAGE} AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
-    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     WHATSAPP_SESSION_PATH=/app/data/sessions
-
-# Chromium + the fonts/libs whatsapp-web.js needs to render.
-# tini is PID 1 to forward signals and reap zombie Chrome child processes.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      tini \
-      chromium \
-      ca-certificates \
-      fonts-liberation \
-      libnss3 \
-      libatk-bridge2.0-0 \
-      libgtk-3-0 \
-      libxss1 \
-      libasound2 \
-      libgbm1 \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
@@ -55,7 +44,7 @@ USER node
 
 EXPOSE 3000
 
-# tini reaps the headless-Chrome processes Puppeteer spawns and forwards
-# SIGTERM (sent by Kubernetes on pod shutdown) to Node for graceful exit.
+# tini (from the base image) reaps the headless-Chrome processes Puppeteer
+# spawns and forwards SIGTERM (sent by Kubernetes on pod shutdown) to Node.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/server.js"]
