@@ -105,6 +105,7 @@ export class WhatsappService {
     /** Wire up event handlers and start the underlying browser/session. */
     public async initClient(): Promise<void> {
         this.registerEventHandlers();
+        await this.clearChromiumLocks();
 
         const maxAttempts = Math.max(1, config.whatsapp.initMaxAttempts);
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -318,6 +319,32 @@ export class WhatsappService {
         }
     }
 
+    /**
+     * Remove stale Chromium singleton lock files from the persisted profile.
+     * When a pod/process is killed without a clean shutdown (OOM, node drain),
+     * Chromium leaves a SingletonLock symlink behind. On a persistent session
+     * volume the next launch sees it and aborts with "The profile appears to be
+     * in use by another Chromium process", code 21. Safe to clear because this
+     * service is single-instance — only one process owns the session at a time.
+     */
+    private async clearChromiumLocks(): Promise<void> {
+        // LocalAuth stores the Chromium user-data-dir at <sessionPath>/session-<clientId>.
+        const profileDir = join(
+            config.whatsapp.sessionPath,
+            `session-${config.whatsapp.clientId}`,
+        );
+        const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+        await Promise.all(
+            lockFiles.map(async (name) => {
+                try {
+                    await rm(join(profileDir, name), {force: true, recursive: true});
+                } catch (err) {
+                    logger.warn(`Failed to remove stale Chromium lock ${name}`, err);
+                }
+            }),
+        );
+    }
+
     /** Validate the number exists on WhatsApp and return its chat id. */
     private async resolveChatId(phoneNumber: string): Promise<string> {
         const sanitized = phoneNumber.replace(/\D/g, '');
@@ -406,6 +433,7 @@ export class WhatsappService {
             } catch (destroyErr) {
                 logger.warn('Error while destroying client during recovery', destroyErr);
             }
+            await this.clearChromiumLocks();
             this.status = 'initializing';
             await this.client.initialize();
         } catch (reinitErr) {
