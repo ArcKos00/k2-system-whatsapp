@@ -16,8 +16,6 @@ kind: ConfigMap
 metadata:
   name: whatsapp-api-config
   namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${SERVICE_NAME}
 data:
   PORT: "3000"
   NODE_ENV: "production" 
@@ -35,8 +33,6 @@ kind: PersistentVolumeClaim
 metadata:
   name: whatsapp-data
   namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -50,8 +46,6 @@ kind: Deployment
 metadata:
   name: ${SERVICE_NAME}
   namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   replicas: 1
   strategy:
@@ -123,8 +117,6 @@ kind: Service
 metadata:
   name: ${SERVICE_NAME}
   namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${SERVICE_NAME}
 spec:
   type: ClusterIP
   selector:
@@ -142,8 +134,7 @@ kind: Ingress
 metadata:
   name: ${SERVICE_NAME}
   namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${SERVICE_NAME}
+  annotations:
     cert-manager.io/cluster-issuer: k2-intermediate-issuer
 spec:
   ingressClassName: haproxy
