@@ -76,6 +76,8 @@ spec:
                 name: whatsapp-api-config
             - configMapRef:
                 name: whatsapp-to-rabbit-config
+            - configMapRef:
+                name: rabbitmq-config
           volumeMounts:
             - name: data
               mountPath: /app/data
