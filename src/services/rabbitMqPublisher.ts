@@ -25,9 +25,16 @@ export class RabbitMqPublisher {
     /** Guards against overlapping connect attempts. */
     private connecting: Promise<void> | null = null;
     private closed = false;
+    /** Chat ids to forward; empty Set means "forward all chats". */
+    private readonly allowedChatIds = new Set(config.rabbitmq.chatIds);
 
     public get isEnabled(): boolean {
         return Boolean(config.rabbitmq.url);
+    }
+
+    /** Whether a chat's messages should be forwarded, per the allowlist. */
+    private isAllowed(chatId: string): boolean {
+        return this.allowedChatIds.size === 0 || this.allowedChatIds.has(chatId);
     }
 
     /** Establish the initial connection (no-op when no URL is configured). */
@@ -48,6 +55,10 @@ export class RabbitMqPublisher {
      */
     public publishMessage(chatId: string, payload: unknown): boolean {
         if (!this.isEnabled) {
+            return false;
+        }
+        if (!this.isAllowed(chatId)) {
+            logger.debug('Skipping message: chat not in forward allowlist.', { chatId });
             return false;
         }
         if (!this.channel) {

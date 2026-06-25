@@ -9,6 +9,16 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/** Parse a comma-separated env var into a trimmed, non-empty string list. */
+function list(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -117,6 +127,13 @@ export const config = {
     exchange: process.env.RABBITMQ_EXCHANGE ?? 'whatsapp.messages',
     /** Pause (ms) before retrying a lost AMQP connection. */
     reconnectDelayMs: num('RABBITMQ_RECONNECT_DELAY_MS', 5000),
+    /**
+     * Allowlist of chat ids (`message.from`) whose inbound messages are
+     * forwarded to RabbitMQ, comma-separated, e.g.
+     * "380501234567@c.us,120363000000000000@g.us".
+     * Leave empty to forward messages from ALL chats.
+     */
+    chatIds: list('RABBITMQ_CHAT_IDS'),
   },
 } as const;
 

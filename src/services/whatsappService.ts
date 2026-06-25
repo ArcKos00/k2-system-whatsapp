@@ -271,8 +271,11 @@ export class WhatsappService {
 
         this.client.on('message', async (message) => {
             const chatId = message.from;
+            
+            const contact = await message.getContact();
             logger.info(`Received message from chat ${chatId}`, {
                 author: message.author,
+                some: contact.name,
                 hasMedia: message.hasMedia,
             });
 

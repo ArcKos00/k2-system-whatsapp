@@ -74,6 +74,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: whatsapp-api-config
+            - configMapRef:
+                name: whatsapp-to-rabbit-config
           volumeMounts:
             - name: data
               mountPath: /app/data
