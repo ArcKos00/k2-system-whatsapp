@@ -106,11 +106,14 @@ spec:
           resources:
             requests:
               cpu: "250m"
-              memory: "256Mi"
-            limits:
-              # headless Chrome is memory-hungry.
-              cpu: "1000m"
               memory: "1Gi"
+            limits:
+              # headless Chrome is memory-hungry and grows as WA Web reloads;
+              # 1Gi was too tight and caused OOMKilled (137). Node heap is capped
+              # at 1024Mi (NODE_OPTIONS) below this so V8 GCs instead of OOMing,
+              # leaving headroom for the Chromium renderer's native memory.
+              cpu: "1000m"
+              memory: "2Gi"
       volumes:
         - name: data
           persistentVolumeClaim:

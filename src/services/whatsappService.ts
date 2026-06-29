@@ -62,6 +62,17 @@ export class WhatsappService {
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
+                // Memory-reduction flags: headless Chromium under a k8s memory
+                // limit grows steadily as WA Web reloads/re-injects, which is the
+                // usual cause of OOMKilled (137). These trim its footprint.
+                '--no-zygote',
+                '--js-flags=--max-old-space-size=256',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--mute-audio',
             ],
         };
 

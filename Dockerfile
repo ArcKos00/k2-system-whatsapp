@@ -19,8 +19,12 @@ RUN npm prune --omit=dev
 FROM 10.20.50.25:8081/node:20-bookworm-slim AS runtime
 WORKDIR /app
 
+# Cap the Node heap well below the container memory limit (2Gi) so V8 GCs
+# instead of being OOM-killed; the headless Chromium that whatsapp-web.js
+# spawns lives outside this heap, so leave it ample headroom.
 ENV NODE_ENV=production \
-    WHATSAPP_SESSION_PATH=/app/data/sessions
+    WHATSAPP_SESSION_PATH=/app/data/sessions \
+    NODE_OPTIONS=--max-old-space-size=1024
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
