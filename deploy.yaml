@@ -18,7 +18,7 @@ metadata:
   namespace: ${NAMESPACE}
 data:
   PORT: "3000"
-  NODE_ENV: "production" 
+  NODE_ENV: "production"
   KEYCLOAK_AUTH_SERVER_URL: "http://keycloak.infrastructure.svc.cluster.local:8080"
   KEYCLOAK_REALM: "k2"
   PATH_BASE: ${BASE_PATH}
@@ -48,6 +48,9 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   replicas: 1
+  # Keep only the current ReplicaSet (plus one prior for rollback); avoids a
+  # pile-up of old 0-replica ReplicaSets from past deploys.
+  revisionHistoryLimit: 1
   strategy:
     # Recreate (not RollingUpdate): the PVC is RWO and the WhatsApp session is
     # single-owner, so the old pod must stop before the new one starts.
@@ -60,14 +63,30 @@ spec:
       labels:
         app.kubernetes.io/name: ${SERVICE_NAME}
     spec:
+      # Allow time for a clean shutdown: SIGTERM -> close server, destroy the
+      # Chromium session, close RabbitMQ. A clean exit releases the Chromium
+      # SingletonLock on the PVC (the next start clears stale locks anyway).
+      terminationGracePeriodSeconds: 60
       securityContext:
         # node user (uid 1000) from the base image must own the mounted volume.
         fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ${SERVICE_NAME}
           # Built from this repo's Dockerfile and pushed to your registry.
+          # NOTE: with a mutable tag (e.g. "latest") IfNotPresent will NOT pull a
+          # freshly pushed image — use an immutable tag (git sha) per deploy.
           image: "${REPOSITORY}:${IMAGE_TAG}"
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Chromium runs with --no-sandbox, so it needs no Linux capabilities.
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: 3000
