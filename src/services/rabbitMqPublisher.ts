@@ -6,7 +6,8 @@ import { logger } from '../utils/logger';
 // amqplib's exact connection/channel types vary slightly between minor
 // versions; derive them from the API so we stay version-agnostic.
 type AmqpConnection = Awaited<ReturnType<typeof amqp.connect>>;
-type AmqpChannel = Awaited<ReturnType<AmqpConnection['createChannel']>>;
+// Confirm channel: its publish() accepts a broker ack/nack callback.
+type AmqpChannel = Awaited<ReturnType<AmqpConnection['createConfirmChannel']>>;
 
 /**
  * Owns a single AMQP connection/channel and publishes inbound WhatsApp
@@ -49,40 +50,60 @@ export class RabbitMqPublisher {
 
     /**
      * Publish a message to the headers exchange, tagged with `chatId`.
-     * Returns true if handed to the broker, false if dropped (not connected
-     * or back-pressured). Never throws — forwarding must not break message
-     * handling.
+     * Resolves true ONLY once the broker has confirmed the publish (this is a
+     * confirm channel), false if the message could not be durably handed off
+     * (not connected, allowlist-filtered, or nacked). Never throws — callers
+     * rely on the boolean to decide whether it is safe to advance the delivery
+     * cursor, so a filtered message counts as "handled" (see `isAllowed`).
+     *
+     * `messageId` is the WhatsApp message id; it is set as the AMQP messageId
+     * so downstream consumers can deduplicate (delivery is at-least-once).
      */
-    public publishMessage(chatId: string, payload: unknown): boolean {
+    public publishMessage(chatId: string, payload: unknown, messageId?: string): Promise<boolean> {
         if (!this.isEnabled) {
-            return false;
+            return Promise.resolve(false);
         }
+        // Allowlist-filtered messages are intentionally not forwarded; report
+        // success so the cursor advances past them (they are not "lost").
         if (!this.isAllowed(chatId)) {
             logger.debug('Skipping message: chat not in forward allowlist.', { chatId });
-            return false;
+            return Promise.resolve(true);
         }
-        if (!this.channel) {
-            logger.warn('Dropping message: RabbitMQ channel not available.', { chatId });
-            return false;
+        const channel = this.channel;
+        if (!channel) {
+            logger.warn('Cannot publish yet: RabbitMQ channel not available.', { chatId });
+            return Promise.resolve(false);
         }
 
-        try {
-            // Routing key is ignored by headers exchanges; matching is done on
-            // the `headers` map below.
-            return this.channel.publish(
-                config.rabbitmq.exchange,
-                '',
-                Buffer.from(JSON.stringify(payload)),
-                {
-                    headers: { chatId },
-                    contentType: 'application/json',
-                    persistent: true,
-                },
-            );
-        } catch (err) {
-            logger.error('Failed to publish message to RabbitMQ', err);
-            return false;
-        }
+        return new Promise<boolean>((resolve) => {
+            try {
+                // Routing key is ignored by headers exchanges; matching is done
+                // on the `headers` map below. The callback fires on broker
+                // confirm/nack (confirm channel), which is our durability gate.
+                channel.publish(
+                    config.rabbitmq.exchange,
+                    '',
+                    Buffer.from(JSON.stringify(payload)),
+                    {
+                        headers: { chatId },
+                        contentType: 'application/json',
+                        persistent: true,
+                        messageId,
+                    },
+                    (err) => {
+                        if (err) {
+                            logger.warn('RabbitMQ nacked publish; will retry via reconcile.', { chatId, err });
+                            resolve(false);
+                        } else {
+                            resolve(true);
+                        }
+                    },
+                );
+            } catch (err) {
+                logger.error('Failed to publish message to RabbitMQ', err);
+                resolve(false);
+            }
+        });
     }
 
     /** Close the channel/connection on shutdown. */
@@ -121,7 +142,9 @@ export class RabbitMqPublisher {
         }
         try {
             const connection = await amqp.connect(url);
-            const channel = await connection.createChannel();
+            // Confirm channel: publish callbacks fire on broker ack/nack, which
+            // lets publishMessage() report durable hand-off (no silent drops).
+            const channel = await connection.createConfirmChannel();
             await channel.assertExchange(config.rabbitmq.exchange, 'headers', {
                 durable: true,
             });

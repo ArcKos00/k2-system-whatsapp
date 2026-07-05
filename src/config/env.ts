@@ -76,6 +76,38 @@ export const config = {
      */
     frameRetryDelayMs: num('WHATSAPP_FRAME_RETRY_DELAY_MS', 1500),
     /**
+     * How often to actively probe the live WhatsApp Web session with
+     * client.getState(), ms. This catches "silent deaths" where the page/frame
+     * detaches and inbound messages stop firing without a 'disconnected' event —
+     * the usual cause of a listener-only service that quietly stops receiving
+     * after long uptime. 0 disables the heartbeat.
+     */
+    healthCheckIntervalMs: num('WHATSAPP_HEALTH_CHECK_INTERVAL_MS', 60000),
+    /** Hard cap on a single health-check getState() call, ms. */
+    healthCheckTimeoutMs: num('WHATSAPP_HEALTH_CHECK_TIMEOUT_MS', 15000),
+    /**
+     * How often the reconcile loop re-scans chats for messages newer than the
+     * persisted cursor and (re)publishes any the broker hasn't confirmed, ms.
+     * This is the safety net that guarantees no inbound message is lost: it
+     * covers both session-downtime gaps and RabbitMQ-outage gaps. 0 disables.
+     */
+    reconcileIntervalMs: num('WHATSAPP_RECONCILE_INTERVAL_MS', 30000),
+    /** Max messages fetched per chat during a catch-up/reconcile scan. */
+    catchUpLimitPerChat: num('WHATSAPP_CATCHUP_LIMIT_PER_CHAT', 50),
+    /**
+     * Seconds of overlap re-scanned below the cursor on each reconcile pass, to
+     * catch messages that sync into WhatsApp Web late with an older timestamp
+     * than the cursor (rare clock/sync skew). Re-published messages are
+     * deduplicated downstream by message id. 0 disables the overlap.
+     */
+    reconcileLookbackSec: num('WHATSAPP_RECONCILE_LOOKBACK_SEC', 0),
+    /**
+     * Where the delivery cursor (highest confirmed message timestamp) is
+     * persisted. Must live on the same durable volume as the session so it
+     * survives restarts. Defaults to <sessionPath>/cursor.json.
+     */
+    cursorPath: process.env.WHATSAPP_CURSOR_PATH || undefined,
+    /**
      * How many times to retry client.initialize() when it fails or hangs
      * (transient "Execution context was destroyed", or a stuck inject/launch).
      */
