@@ -8,7 +8,6 @@ import { ForbiddenError, UnauthorizedError } from '../errors/appErrors';
 const issuer = `${config.keycloak.authServerUrl}/realms/${config.keycloak.realm}`;
 const jwksUri = `${issuer}/protocol/openid-connect/certs`;
 
-// Caches signing keys from the Keycloak realm; refreshes on key rotation.
 const jwks = new JwksClient({
   jwksUri,
   cache: true,
@@ -52,7 +51,6 @@ function verify(token: string): Promise<JwtPayload> {
   });
 }
 
-/** Flatten Keycloak realm + client roles into a single list. */
 function extractRoles(payload: JwtPayload): string[] {
   const realmRoles: string[] = payload.realm_access?.roles ?? [];
   const resourceAccess = (payload.resource_access ?? {}) as Record<string, { roles?: string[] }>;
@@ -60,11 +58,6 @@ function extractRoles(payload: JwtPayload): string[] {
   return [...realmRoles, ...clientRoles];
 }
 
-/**
- * tsoa authentication hook. Invoked for every `@Security('keycloak')` route.
- * `scopes` map to required Keycloak roles (realm or client roles).
- * Referenced from tsoa.json -> routes.authenticationModule.
- */
 export async function expressAuthentication(
   request: Request,
   securityName: string,
@@ -97,6 +90,5 @@ export async function expressAuthentication(
     }
   }
 
-  // Returned value is attached to request.user by tsoa.
   return payload;
 }

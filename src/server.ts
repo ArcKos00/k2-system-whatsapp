@@ -1,5 +1,3 @@
-// MUST be first: starts the Elastic APM agent so it can instrument express,
-// http and other modules as they are required below.
 import './apm';
 import 'reflect-metadata';
 import { container } from 'tsyringe';
@@ -14,12 +12,8 @@ async function bootstrap(): Promise<void> {
   const rabbitmq = container.resolve(RabbitMqPublisher);
   const whatsapp = container.resolve(WhatsappService);
 
-  // Connect to RabbitMQ before the WhatsApp client so inbound messages have a
-  // channel to publish to. Best-effort: a missing broker won't block startup.
   await rabbitmq.init();
 
-  // Start the HTTP server first so /health and /qr are reachable immediately,
-  // then connect WhatsApp in the background (login may need a QR scan).
   const app = createApp();
   const base = config.pathBase;
   const server = app.listen(config.port, () => {
@@ -35,13 +29,6 @@ async function bootstrap(): Promise<void> {
     logger.error('WhatsApp client failed to initialize', err);
   });
 
-  // whatsapp-web.js re-injects when WA Web navigates/reloads after 'ready' and
-  // can throw "Execution context was destroyed" from inside its own internals,
-  // i.e. as an unhandled rejection. Node 24 would terminate the process on
-  // that. Intercept it: swallow known-transient WhatsApp errors (the session is
-  // usually still fine; if it isn't, the next send detects the dead frame and
-  // triggers recovery lazily), and only crash — letting the supervisor restart
-  // us — on genuinely unexpected errors.
   const handleFatal = (kind: string, err: unknown): void => {
     if (whatsapp.isRecoverableError(err)) {
       logger.warn(`Ignoring transient WhatsApp error (${kind}); session left intact.`, err);

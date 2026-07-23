@@ -1,7 +1,3 @@
-/**
- * Base class for all expected, mappable application errors.
- * The global error handler turns these into clean JSON responses.
- */
 export class AppError extends Error {
   constructor(
     message: string,
@@ -14,21 +10,18 @@ export class AppError extends Error {
   }
 }
 
-/** WhatsApp client has not finished authenticating / is disconnected. */
 export class WhatsAppNotReadyError extends AppError {
   constructor() {
     super('WhatsApp client is not connected. Scan the QR code or wait for reconnection.', 503, 'WA_NOT_READY');
   }
 }
 
-/** The provided phone number is not a registered WhatsApp account. */
 export class NumberNotFoundError extends AppError {
   constructor(phoneNumber: string) {
     super(`Phone number is not registered on WhatsApp: ${phoneNumber}`, 404, 'WA_NUMBER_NOT_FOUND');
   }
 }
 
-/** A request reached WhatsApp but failed to send. */
 export class MessageSendError extends AppError {
   constructor(detail: string) {
     super(`Failed to send WhatsApp message: ${detail}`, 502, 'WA_SEND_FAILED');

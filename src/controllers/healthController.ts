@@ -12,14 +12,7 @@ export interface ReadinessResponse {
   whatsapp: WhatsAppStatus;
 }
 
-/**
- * Liveness probe: reports that the process is up and serving. Intentionally NOT
- * secured so that orchestrators (Docker, k8s) can poll it without a token.
- *
- * This deliberately answers 200 for every WhatsApp status — restarting the pod
- * does not fix a session that is waiting on a QR scan. Use /ready to decide
- * whether the service can actually send.
- */
+/** Liveness probe: the process is up, regardless of WhatsApp session state. */
 @injectable()
 @Route('health')
 @Tags('Health')
@@ -34,15 +27,7 @@ export class HealthController extends Controller {
   }
 }
 
-/**
- * Readiness probe: whether the WhatsApp session can actually serve traffic.
- *
- * Answers 503 unless the client is 'ready', because every other status —
- * including 'authenticated', where the session credentials are accepted but
- * WhatsApp Web has not finished loading — rejects sends with WA_NOT_READY.
- * Wiring this to the k8s readinessProbe takes the pod out of the Service while
- * it cannot send, instead of serving 503s from a pod that looks healthy.
- */
+/** Readiness probe: 503 unless the WhatsApp session can actually send. */
 @injectable()
 @Route('ready')
 @Tags('Health')
