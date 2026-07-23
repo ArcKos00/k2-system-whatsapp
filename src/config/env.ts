@@ -86,6 +86,16 @@ export const config = {
     /** Hard cap on a single health-check getState() call, ms. */
     healthCheckTimeoutMs: num('WHATSAPP_HEALTH_CHECK_TIMEOUT_MS', 15000),
     /**
+     * How long the client may sit in a non-ready, non-QR state ('initializing'
+     * or 'authenticated') before the watchdog forces a session restart, ms.
+     * Covers the case where WhatsApp accepts the session credentials but the
+     * 'ready' event never arrives (stalled inject / endless initial sync):
+     * nothing else recovers from it, so the service would stay unable to send
+     * forever while /health still reported an authenticated session.
+     * 0 disables the watchdog.
+     */
+    readyTimeoutMs: num('WHATSAPP_READY_TIMEOUT_MS', 180000),
+    /**
      * How often the reconcile loop re-scans chats for messages newer than the
      * persisted cursor and (re)publishes any the broker hasn't confirmed, ms.
      * This is the safety net that guarantees no inbound message is lost: it

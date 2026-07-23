@@ -48,6 +48,11 @@ export class WhatsappService {
     private reinitializing = false;
     /** Periodic liveness probe; catches silent session deaths while idle. */
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    /**
+     * Bounds how long the client may stay authenticated-but-not-ready before we
+     * force a session restart. See armReadyWatchdog().
+     */
+    private readyWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
     /** Periodic catch-up scan; the safety net that guarantees no lost message. */
     private reconcileTimer: ReturnType<typeof setInterval> | null = null;
     /** Guards against overlapping reconcile passes. */
@@ -135,6 +140,11 @@ export class WhatsappService {
         await this.loadCursor();
         this.registerEventHandlers();
         await this.clearChromiumLocks();
+        // Probe and watchdog run from the very first attempt, not just once
+        // 'ready' fires — a session that never becomes ready is exactly the
+        // failure they exist to catch.
+        this.startHeartbeat();
+        this.armReadyWatchdog();
 
         const maxAttempts = Math.max(1, config.whatsapp.initMaxAttempts);
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -208,6 +218,7 @@ export class WhatsappService {
     public async destroy(): Promise<void> {
         this.stopHeartbeat();
         this.stopReconcile();
+        this.clearReadyWatchdog();
         try {
             await this.client.destroy();
         } catch (err) {
@@ -238,6 +249,44 @@ export class WhatsappService {
     }
 
     /**
+     * (Re)arm the stuck-in-limbo watchdog. WhatsApp can accept the persisted
+     * session ('authenticated') and then never emit 'ready' — a stalled inject
+     * or an initial sync that never finishes. Nothing else detects that: the
+     * heartbeat and reconcile loops only act on a 'ready' session, and no
+     * 'disconnected' event ever fires, so the service would report an
+     * authenticated session while every send failed with WA_NOT_READY, forever.
+     * Restart the session if 'ready' has not arrived within the timeout.
+     */
+    private armReadyWatchdog(): void {
+        const timeout = config.whatsapp.readyTimeoutMs;
+        if (timeout <= 0) {
+            return;
+        }
+        this.clearReadyWatchdog();
+        this.readyWatchdogTimer = setTimeout(() => {
+            this.readyWatchdogTimer = null;
+            if (this.status === 'ready' || this.status === 'qr' || this.reinitializing) {
+                return;
+            }
+            logger.warn('Watchdog: client never became ready; restarting session.', {
+                status: this.status,
+                timeoutMs: timeout,
+            });
+            void this.recoverFromFrameError(
+                new Error(`stuck in status=${this.status} for ${timeout}ms without 'ready'`),
+            );
+        }, timeout);
+        this.readyWatchdogTimer.unref?.();
+    }
+
+    private clearReadyWatchdog(): void {
+        if (this.readyWatchdogTimer) {
+            clearTimeout(this.readyWatchdogTimer);
+            this.readyWatchdogTimer = null;
+        }
+    }
+
+    /**
      * Actively verify the session is still alive. whatsapp-web.js can stop
      * delivering 'message' events without ever emitting 'disconnected' when the
      * underlying page/frame silently detaches; getState() surfaces that (it
@@ -245,24 +294,43 @@ export class WhatsappService {
      * triggers the same recovery path used by the send flow.
      */
     private async checkHealth(): Promise<void> {
-        // Skip while a (re)init is already in flight or we know we're not ready;
-        // the recovery/ready lifecycle already governs those transitions.
-        if (this.reinitializing || this.status !== 'ready') {
+        // Skip while a (re)init is in flight (recovery already owns the
+        // transition) or while we're waiting on a human to scan the QR, which
+        // is legitimately open-ended.
+        if (this.reinitializing || this.status === 'qr') {
             return;
         }
+        // In 'initializing'/'authenticated' the session is not expected to be
+        // connected yet, so the probe only reports — forcing a restart there is
+        // the ready-watchdog's job, which bounds that wait explicitly.
+        const ready = this.status === 'ready';
         try {
             const state = await this.withTimeout(
                 Promise.resolve(this.client.getState()),
                 config.whatsapp.healthCheckTimeoutMs,
                 'client.getState',
             );
-            if (state !== 'CONNECTED') {
+            if (state === 'CONNECTED') {
+                return;
+            }
+            if (ready) {
                 logger.warn('Heartbeat: session not connected; recovering.', {state});
                 void this.recoverFromFrameError(new Error(`health check state=${String(state)}`));
+            } else {
+                logger.info('Heartbeat: still waiting for a ready session.', {
+                    status: this.status,
+                    state,
+                });
             }
         } catch (err) {
-            logger.warn('Heartbeat: getState failed; recovering session.', err);
-            void this.recoverFromFrameError(err);
+            if (ready) {
+                logger.warn('Heartbeat: getState failed; recovering session.', err);
+                void this.recoverFromFrameError(err);
+            } else {
+                logger.info('Heartbeat: getState unavailable while not ready.', {
+                    status: this.status,
+                });
+            }
         }
     }
 
@@ -486,6 +554,9 @@ export class WhatsappService {
         this.client.on('qr', (qr) => {
             this.status = 'qr';
             this.currentQr = qr;
+            // Waiting on a human to scan is open-ended; restarting the session
+            // underneath them would only invalidate the QR they're looking at.
+            this.clearReadyWatchdog();
             logger.warn('WhatsApp session not found — scan the QR (GET /qr) to log in.');
             // Terminal rendering is aspect-ratio dependent (often stretched in log
             // viewers), so the PNG (file + /qr endpoint) is the reliable version.
@@ -498,6 +569,9 @@ export class WhatsappService {
             // The QR is a login credential — drop it once it is consumed.
             this.currentQr = null;
             logger.info('WhatsApp authenticated; session persisted.');
+            // Credentials accepted, but sends stay blocked until 'ready'. Bound
+            // that wait — this is the state the watchdog primarily guards.
+            this.armReadyWatchdog();
             void this.removeQrImage();
         });
 
@@ -509,6 +583,7 @@ export class WhatsappService {
         this.client.on('ready', () => {
             this.status = 'ready';
             this.currentQr = null;
+            this.clearReadyWatchdog();
             logger.info('WhatsApp client is ready.');
             // Start (idempotently) probing liveness now that we have a session.
             this.startHeartbeat();
@@ -681,6 +756,9 @@ export class WhatsappService {
             }
             await this.clearChromiumLocks();
             this.status = 'initializing';
+            // Re-arm so a recovery that itself stalls before 'ready' is retried
+            // rather than leaving the client stuck again.
+            this.armReadyWatchdog();
             await this.client.initialize();
         } catch (reinitErr) {
             this.status = 'disconnected';
