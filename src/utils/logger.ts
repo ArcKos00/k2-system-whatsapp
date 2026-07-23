@@ -11,7 +11,6 @@ function emit(level: Level, message: string, meta?: unknown): void {
   }
 }
 
-/** Minimal dependency-free structured-ish logger. Swap for pino/winston if needed. */
 export const logger = {
   debug: (message: string, meta?: unknown) => emit('debug', message, meta),
   info: (message: string, meta?: unknown) => emit('info', message, meta),

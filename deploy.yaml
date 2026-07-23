@@ -27,6 +27,8 @@ data:
   WHATSAPP_MESSAGE_DELAY_MS: "3000"
   PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+  WHATSAPP_READY_TIMEOUT_MS: "180000"
+  WHATSAPP_RECONCILE_MAX_FAILURES: "3"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -115,9 +117,13 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
+          # /ready (unlike /health) returns 503 whenever the WhatsApp session
+          # cannot send — including 'authenticated', where login succeeded but
+          # WhatsApp Web never finished loading. Keeps the pod out of the
+          # Service while sends would fail with WA_NOT_READY.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             periodSeconds: 15
             timeoutSeconds: 5

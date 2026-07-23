@@ -14,16 +14,9 @@ import { injectable } from 'tsyringe';
 import { MediaAttachment, WhatsappService } from '../services/whatsappService';
 import { ErrorResponse, SendMessageDto, SendMessageResponse } from '../dtos/sendMessage.dto';
 
-/**
- * Sending WhatsApp messages. All endpoints require a valid Keycloak token.
- *
- * The optional `scopes` argument of `@Security` maps to Keycloak roles, e.g.
- * `@Security('keycloak', ['whatsapp:send'])` — enable once the role exists.
- */
 @injectable()
 @Route('messages')
 @Tags('Messages')
-//@Security('keycloak')
 @Response<ErrorResponse>(401, 'Unauthorized')
 @Response<ErrorResponse>(404, 'Phone number not registered on WhatsApp')
 @Response<ErrorResponse>(503, 'WhatsApp client not connected')
@@ -32,10 +25,7 @@ export class MessagesController extends Controller {
     super();
   }
 
-  /**
-   * Send a text message and/or base64-encoded attachments as JSON.
-   * Best for small payloads; use the multipart endpoint for larger files.
-   */
+  /** Send a text message and/or base64-encoded attachments as JSON. */
   @Post('send')
   @SuccessResponse(202, 'Accepted — message dispatched')
   @Response<ErrorResponse>(422, 'Validation failed')
@@ -51,10 +41,7 @@ export class MessagesController extends Controller {
     return result;
   }
 
-  /**
-   * Send a message with one or more uploaded files (multipart/form-data).
-   * Files are received in memory and forwarded as WhatsApp MessageMedia.
-   */
+  /** Send a message with one or more uploaded files (multipart/form-data). */
   @Post('send-with-files')
   @SuccessResponse(202, 'Accepted — message dispatched')
   @Response<ErrorResponse>(400, 'Invalid attachment')
