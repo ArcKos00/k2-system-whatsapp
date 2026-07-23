@@ -131,6 +131,7 @@ export class WhatsappService {
     public async destroy(): Promise<void> {
         this.stopHeartbeat();
         this.stopReconcile();
+
         this.clearReadyWatchdog();
         try {
             await this.client.destroy();

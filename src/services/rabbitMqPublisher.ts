@@ -31,6 +31,8 @@ export class RabbitMqPublisher {
         if (!this.isEnabled) {
             return Promise.resolve(false);
         }
+        // Allowlist-filtered messages are intentionally not forwarded; report
+        // success so the cursor advances past them (they are not "lost").
         if (!this.isAllowed(chatId)) {
             logger.debug('Skipping message: chat not in forward allowlist.', { chatId });
             return Promise.resolve(true);
