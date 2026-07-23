@@ -57,6 +57,8 @@ export class WhatsappService {
     private reconcileTimer: ReturnType<typeof setInterval> | null = null;
     /** Guards against overlapping reconcile passes. */
     private reconciling = false;
+    /** Consecutive reconcile passes that threw; reset by any clean pass. */
+    private reconcileFailures = 0;
     /**
      * Delivery cursor: WhatsApp timestamp (seconds) of the newest message we
      * have confirmed-published. Reconcile re-scans everything at-or-after this
@@ -448,6 +450,8 @@ export class WhatsappService {
                 this.cursor = maxConfirmed;
                 await this.saveCursor();
             }
+            // The pass ran end-to-end; whatever the page threw before has cleared.
+            this.reconcileFailures = 0;
             if (published > 0) {
                 logger.info('Reconcile pass complete', {
                     published,
@@ -460,7 +464,26 @@ export class WhatsappService {
                 logger.warn('Reconcile: session frame lost mid-scan; recovering.', err);
                 void this.recoverFromFrameError(err);
             } else {
-                logger.error('Reconcile pass failed', err);
+                this.reconcileFailures += 1;
+                const limit = config.whatsapp.reconcileMaxFailures;
+                // WhatsApp Web throws minified errors ("r: r") out of the single
+                // page.evaluate behind getChats, so name/message carry nothing —
+                // log the stack, which at least identifies the failing call.
+                logger.error('Reconcile pass failed', {
+                    consecutiveFailures: this.reconcileFailures,
+                    error: this.describeError(err),
+                });
+                if (limit > 0 && this.reconcileFailures >= limit) {
+                    // Not a frame error by the regex, but reconciliation has been
+                    // down for several passes: the injected Store is broken even
+                    // though getState() still reports CONNECTED, so the heartbeat
+                    // will never catch it. Restart the session.
+                    logger.warn('Reconcile: failing persistently; restarting session.', {
+                        consecutiveFailures: this.reconcileFailures,
+                    });
+                    this.reconcileFailures = 0;
+                    void this.recoverFromFrameError(err);
+                }
             }
         } finally {
             this.reconciling = false;
@@ -728,6 +751,18 @@ export class WhatsappService {
      * down (WhatsApp Web reload, renderer crash, session closed) rather than a
      * genuine application-level failure. These are transient and recoverable.
      */
+    /**
+     * Render an error for logging. Errors thrown out of WhatsApp Web's own
+     * bundle are minified, so name and message are both a single letter; the
+     * stack is the only part that says which call failed.
+     */
+    private describeError(err: unknown): string {
+        if (err instanceof Error) {
+            return err.stack ?? `${err.name}: ${err.message}`;
+        }
+        return String(err);
+    }
+
     private isTransientFrameError(err: unknown): boolean {
         const message = err instanceof Error ? err.message : String(err);
         return /detached Frame|Execution context was destroyed|Session closed|Target closed|Protocol error|Most likely the page has been closed/i.test(

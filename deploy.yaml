@@ -28,6 +28,7 @@ data:
   PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
   WHATSAPP_READY_TIMEOUT_MS: "180000"
+  WHATSAPP_RECONCILE_MAX_FAILURES: "3"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

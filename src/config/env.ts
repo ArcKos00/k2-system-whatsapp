@@ -105,6 +105,15 @@ export const config = {
     /** Max messages fetched per chat during a catch-up/reconcile scan. */
     catchUpLimitPerChat: num('WHATSAPP_CATCHUP_LIMIT_PER_CHAT', 50),
     /**
+     * How many consecutive reconcile passes may fail outright before the
+     * session is restarted. A single failure is normal (WhatsApp Web throws a
+     * minified error out of getChats when one chat's model won't serialize) and
+     * self-heals on the next pass. A persistent one means the injected Store is
+     * broken — which getState() does NOT surface, so the session looks healthy
+     * while inbound reconciliation is dead. 0 disables the escalation.
+     */
+    reconcileMaxFailures: num('WHATSAPP_RECONCILE_MAX_FAILURES', 3),
+    /**
      * Seconds of overlap re-scanned below the cursor on each reconcile pass, to
      * catch messages that sync into WhatsApp Web late with an older timestamp
      * than the cursor (rare clock/sync skew). Re-published messages are
