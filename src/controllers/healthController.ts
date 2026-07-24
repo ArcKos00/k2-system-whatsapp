@@ -1,4 +1,4 @@
-import { Controller, Get, Route, SuccessResponse, Tags } from 'tsoa';
+import { Controller, Get, Route, Tags } from 'tsoa';
 import { injectable } from 'tsyringe';
 import { WhatsappService, WhatsAppStatus } from '../services/whatsappService';
 
@@ -7,19 +7,12 @@ export interface HealthResponse {
   whatsapp: WhatsAppStatus;
 }
 
-/**
- * Readiness, as opposed to liveness: the process is up either way, but it can only
- * actually deliver a message once the WhatsApp client is connected.
- */
 export interface ReadinessResponse {
   status: 'ready' | 'not_ready';
   whatsapp: WhatsAppStatus;
 }
 
-/**
- * Liveness / readiness probe. Intentionally NOT secured so that
- * orchestrators (Docker, k8s) can poll it without a token.
- */
+/** Liveness probe: the process is up, regardless of WhatsApp session state. */
 @injectable()
 @Route('health')
 @Tags('Health')
@@ -34,10 +27,7 @@ export class HealthController extends Controller {
   }
 }
 
-/**
- * Readiness probe. Answers 503 while the WhatsApp client is not connected, so an
- * orchestrator stops sending traffic to a gateway that would only reject sends.
- */
+/** Readiness probe: 503 unless the WhatsApp session can actually send. */
 @injectable()
 @Route('ready')
 @Tags('Health')
@@ -47,13 +37,12 @@ export class ReadinessController extends Controller {
   }
 
   @Get()
-  @SuccessResponse(200, 'Ready to send')
   public async ready(): Promise<ReadinessResponse> {
     const whatsapp = this.whatsapp.getStatus();
-    const ready = whatsapp === 'ready';
-
-    this.setStatus(ready ? 200 : 503);
-
-    return { status: ready ? 'ready' : 'not_ready', whatsapp };
+    if (whatsapp !== 'ready') {
+      this.setStatus(503);
+      return { status: 'not_ready', whatsapp };
+    }
+    return { status: 'ready', whatsapp };
   }
 }
