@@ -113,6 +113,20 @@ export const config = {
     puppeteerChannel: process.env.PUPPETEER_BROWSER_CHANNEL || undefined,
   },
 
+  idempotency: {
+    /**
+     * Where successful sends are remembered so a retried request with the same
+     * `idempotencyKey` is answered from the record instead of sending twice.
+     * Put this on the same mounted volume as the session to survive restarts.
+     */
+    path: process.env.IDEMPOTENCY_STORE_PATH ?? './data/idempotency.json',
+    /**
+     * How long a key stays valid. Must comfortably exceed the caller's total retry
+     * window; beyond it the key is forgotten and a resend would go through.
+     */
+    ttlMs: num('IDEMPOTENCY_TTL_MS', 7 * 24 * 60 * 60 * 1000),
+  },
+
   rabbitmq: {
     /**
      * AMQP connection string, e.g. amqp://user:pass@host:5672. Leave empty to

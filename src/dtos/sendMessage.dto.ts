@@ -42,6 +42,14 @@ export interface SendMessageDto {
    * Optional attachments, base64-encoded.
    */
   files?: MediaFileDto[];
+
+  /**
+   * Caller-supplied key that makes this send idempotent. Retrying with the same key
+   * returns the original result instead of delivering the message a second time,
+   * which is what lets a caller retry safely after a timeout or a crash.
+   * @example "0f8b9d3a-2c4e-4f1a-9b7d-5e6c8a0d1f23"
+   */
+  idempotencyKey?: string;
 }
 
 /**
@@ -53,6 +61,11 @@ export interface SendMessageResponse {
   chatId: string;
   /** Number of individual WhatsApp messages dispatched (text + each file). */
   sentMessages: number;
+  /**
+   * True when this response replays an earlier send matched by `idempotencyKey`,
+   * i.e. nothing new was delivered to WhatsApp.
+   */
+  deduplicated?: boolean;
 }
 
 /**

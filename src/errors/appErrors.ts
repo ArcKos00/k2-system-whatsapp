@@ -41,6 +41,20 @@ export class BadAttachmentError extends AppError {
   }
 }
 
+/**
+ * Another request carrying the same idempotency key is still being sent. The caller
+ * should back off and retry: the outcome of the in-flight send is not known yet.
+ */
+export class DuplicateSendInFlightError extends AppError {
+  constructor(idempotencyKey: string) {
+    super(
+      `A send with idempotency key '${idempotencyKey}' is already in progress. Retry once it settles.`,
+      409,
+      'WA_SEND_IN_FLIGHT',
+    );
+  }
+}
+
 export class UnauthorizedError extends AppError {
   constructor(message = 'Unauthorized') {
     super(message, 401, 'UNAUTHORIZED');
