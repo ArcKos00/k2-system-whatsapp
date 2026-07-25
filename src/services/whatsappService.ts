@@ -1,5 +1,5 @@
 import {Client, LocalAuth, MessageMedia} from 'whatsapp-web.js';
-import type {ClientOptions, Message} from 'whatsapp-web.js';
+import type {Chat, ClientOptions, Message} from 'whatsapp-web.js';
 import type {ChromeReleaseChannel, LaunchOptions} from 'puppeteer';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
@@ -9,6 +9,7 @@ import {singleton} from 'tsyringe';
 import {config} from '../config/env';
 import {logger} from '../utils/logger';
 import {RabbitMqPublisher} from './rabbitMqPublisher';
+import type {ChatListResponse, ChatSummaryDto} from '../dtos/chat.dto';
 import {
     BadAttachmentError,
     MessageSendError,
@@ -49,6 +50,23 @@ const PUPPETEER_ARGS = [
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const toSeconds = (value: unknown): number => (typeof value === 'number' ? value : 0);
+
+/**
+ * The message's serialized id. WhatsApp Web serializes `id` either as the object
+ * whatsapp-web.js types (`{_serialized}`) or as the plain string, depending on the build, and
+ * an id read from only one of those shapes silently becomes `undefined` — which then travels
+ * to RabbitMQ as a message with no id for the consumer to deduplicate reconcile replays by.
+ */
+const messageIdOf = (message: Message): string | undefined => {
+    const id: unknown = message.id;
+
+    if (typeof id === 'string') {
+        return id;
+    }
+
+    const serialized = (id as {_serialized?: unknown} | undefined)?._serialized;
+    return typeof serialized === 'string' ? serialized : undefined;
+};
 
 @singleton()
 export class WhatsappService {
@@ -181,6 +199,46 @@ export class WhatsappService {
 
         logger.info('Message dispatched', {chatId, sentMessages});
         return {success: true, chatId, sentMessages};
+    }
+
+    /**
+     * Every chat the linked account can see, with the id the forward allowlist keys on. A chat
+     * WhatsApp will not let the library model is reported by id under `unreadableChatIds`
+     * rather than failing the listing — the same failure that used to sink whole reconcile
+     * passes.
+     */
+    public async listChatSummaries(): Promise<ChatListResponse> {
+        if (!this.isReady()) {
+            throw new WhatsAppNotReadyError();
+        }
+
+        const allowlist = config.rabbitmq.chatIds;
+        const forwardsEverything = allowlist.length === 0;
+
+        const chats: ChatSummaryDto[] = [];
+        const unreadableChatIds: string[] = [];
+
+        for (const chatId of await this.listChatIds()) {
+            try {
+                const chat = await this.client.getChatById(chatId);
+
+                chats.push({
+                    id: chat?.id?._serialized ?? chatId,
+                    name: chat?.name,
+                    isGroup: chat?.isGroup,
+                    timestamp: chat?.timestamp,
+                    unreadCount: chat?.unreadCount,
+                    forwarded: forwardsEverything || allowlist.includes(chatId),
+                });
+            } catch (err) {
+                logger.warn('Chat listing: chat would not load', {chatId, err});
+                unreadableChatIds.push(chatId);
+            }
+        }
+
+        chats.sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
+
+        return {chats, unreadableChatIds, allowlist: [...allowlist]};
     }
 
     public async getQrPng(): Promise<Buffer | null> {
@@ -394,6 +452,77 @@ export class WhatsappService {
         );
     }
 
+    /**
+     * The chats a reconcile pass walks.
+     *
+     * `client.getChats()` serializes every chat in one page call, so a single chat the library
+     * cannot model — a `@lid` thread or a channel it does not know how to read — rejects the
+     * whole call and no pass ever completes. With a forward allowlist configured we therefore
+     * ask for exactly those chats; nothing else would be published anyway. Without one we fall
+     * back to the bulk read and, if that throws, to reading the ids and fetching chats one at a
+     * time so a bad chat costs its own messages instead of the entire pass.
+     */
+    private async listChats(): Promise<Chat[]> {
+        const allowed = config.rabbitmq.chatIds;
+        if (allowed.length > 0) {
+            return this.fetchChatsById(allowed);
+        }
+
+        try {
+            return await this.client.getChats();
+        } catch (err) {
+            if (this.isTransientFrameError(err)) throw err;
+
+            logger.warn('Reconcile: bulk chat read failed; falling back to per-chat reads.', err);
+            return this.fetchChatsById(await this.listChatIds());
+        }
+    }
+
+    private async fetchChatsById(chatIds: readonly string[]): Promise<Chat[]> {
+        const chats: Chat[] = [];
+
+        for (const chatId of chatIds) {
+            try {
+                const chat = await this.client.getChatById(chatId);
+                if (chat) {
+                    chats.push(chat);
+                }
+            } catch (err) {
+                if (this.isTransientFrameError(err)) throw err;
+                logger.warn('Reconcile: skipping a chat that would not load', {chatId, err});
+            }
+        }
+
+        return chats;
+    }
+
+    /**
+     * Ids only, straight from the collection whatsapp-web.js itself reads. Nothing per-chat is
+     * serialized here, so the one chat that breaks the bulk read cannot break this too.
+     */
+    private async listChatIds(): Promise<string[]> {
+        const page = this.client.pupPage;
+        if (!page) {
+            return [];
+        }
+
+        return page.evaluate(() => {
+            // globalThis, not window: the project compiles without the DOM lib, and inside the
+            // page the two are the same object anyway.
+            const collections = (
+                globalThis as unknown as {
+                    require: (module: string) => {
+                        Chat: {getModelsArray: () => {id?: {_serialized?: string}}[]};
+                    };
+                }
+            ).require('WAWebCollections');
+
+            return collections.Chat.getModelsArray()
+                .map((chat) => chat?.id?._serialized)
+                .filter((chatId): chatId is string => Boolean(chatId));
+        });
+    }
+
     private async reconcile(): Promise<void> {
         if (!this.canReconcile()) return;
 
@@ -403,7 +532,7 @@ export class WhatsappService {
         let allConfirmed = true;
         let published = 0;
         try {
-            for (const chat of await this.client.getChats()) {
+            for (const chat of await this.listChats()) {
                 if (toSeconds(chat.timestamp) < scanFrom && chat.unreadCount <= 0) continue;
 
                 let messages: Message[];
@@ -501,7 +630,7 @@ export class WhatsappService {
 
     private buildPayload(message: Message): Record<string, unknown> {
         return {
-            id: message.id?._serialized,
+            id: messageIdOf(message),
             chatId: message.from,
             from: message.from,
             author: message.author,
@@ -514,16 +643,21 @@ export class WhatsappService {
 
     private async forwardMessage(message: Message): Promise<boolean> {
         const chatId = message.from;
-        const messageId = message.id?._serialized;
-        const confirmed = await this.publisher.publishMessage(
+        const messageId = messageIdOf(message);
+        const result = await this.publisher.publishMessage(
             chatId,
             this.buildPayload(message),
             messageId,
         );
-        if (confirmed) {
+
+        if (result === 'published') {
             logger.info('Message forwarded', {chatId, messageId, hasMedia: message.hasMedia});
         }
-        return confirmed;
+
+        // 'filtered' counts as confirmed: the message was never meant to leave, so the cursor
+        // moves past it. It is not logged as forwarded — that read as a contradiction next to
+        // the allowlist skip line it always follows.
+        return result !== 'unconfirmed';
     }
 
     private async loadCursor(): Promise<void> {

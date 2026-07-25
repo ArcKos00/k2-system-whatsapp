@@ -6,6 +6,13 @@ import { logger } from '../utils/logger';
 type AmqpConnection = Awaited<ReturnType<typeof amqp.connect>>;
 type AmqpChannel = Awaited<ReturnType<AmqpConnection['createConfirmChannel']>>;
 
+/**
+ * What became of a message handed to the publisher: it reached the broker, the allowlist
+ * dropped it on purpose, or the broker never confirmed it and it must be retried. The first
+ * two both let the delivery cursor move on; only the third is a message still owed.
+ */
+export type PublishResult = 'published' | 'filtered' | 'unconfirmed';
+
 @singleton()
 export class RabbitMqPublisher {
     private connection: AmqpConnection | null = null;
@@ -27,23 +34,23 @@ export class RabbitMqPublisher {
         await this.connect();
     }
 
-    public publishMessage(chatId: string, payload: unknown, messageId?: string): Promise<boolean> {
+    public publishMessage(chatId: string, payload: unknown, messageId?: string): Promise<PublishResult> {
         if (!this.isEnabled) {
-            return Promise.resolve(false);
+            return Promise.resolve('unconfirmed');
         }
-        // Allowlist-filtered messages are intentionally not forwarded; report
-        // success so the cursor advances past them (they are not "lost").
+        // Allowlist-filtered messages are intentionally not forwarded; report them as settled
+        // so the cursor advances past them (they are not "lost").
         if (!this.isAllowed(chatId)) {
             logger.debug('Skipping message: chat not in forward allowlist.', { chatId });
-            return Promise.resolve(true);
+            return Promise.resolve('filtered');
         }
         const channel = this.channel;
         if (!channel) {
             logger.warn('Cannot publish yet: RabbitMQ channel not available.', { chatId });
-            return Promise.resolve(false);
+            return Promise.resolve('unconfirmed');
         }
 
-        return new Promise<boolean>((resolve) => {
+        return new Promise<PublishResult>((resolve) => {
             try {
                 channel.publish(
                     config.rabbitmq.exchange,
@@ -59,12 +66,12 @@ export class RabbitMqPublisher {
                         if (err) {
                             logger.warn('RabbitMQ nacked publish; will retry via reconcile.', { chatId, err });
                         }
-                        resolve(!err);
+                        resolve(err ? 'unconfirmed' : 'published');
                     },
                 );
             } catch (err) {
                 logger.error('Failed to publish message to RabbitMQ', err);
-                resolve(false);
+                resolve('unconfirmed');
             }
         });
     }

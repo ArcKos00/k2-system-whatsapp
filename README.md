@@ -181,6 +181,23 @@ ready, check that `html/<version>.html` exists in wa-version, and set the variab
 it to go back to the library default if a pinned build stops loading, and expect to bump it when
 whatsapp-web.js is upgraded.
 
+### Finding chat ids for the forward allowlist
+
+`RABBITMQ_CHAT_IDS` keys on WhatsApp chat ids, which are not something you can read off the
+phone. `GET /chats` lists them:
+
+```bash
+curl -s https://<host>/whatsapp/chats | jq '.chats[] | {id, name, isGroup, forwarded}'
+```
+
+Groups end in `@g.us`, one-to-one chats in `@c.us`, linked-identity threads in `@lid`.
+`forwarded` says what the allowlist currently in force does with each chat, and `allowlist`
+echoes that configuration back. Chats WhatsApp would not let the library model come back as
+bare ids in `unreadableChatIds` — reconcile skips those too.
+
+Without the endpoint the ids are also visible in the logs: every inbound message logs its
+`chatId`, whether it was forwarded or dropped by the allowlist.
+
 ### Reconcile back-off
 
 The reconcile loop republishes anything the live listener missed. `WHATSAPP_RECONCILE_MAX_FAILURES`
