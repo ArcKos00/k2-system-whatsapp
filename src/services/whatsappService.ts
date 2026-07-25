@@ -84,6 +84,13 @@ export class WhatsappService {
 
     private reconcileTimer: ReturnType<typeof setInterval> | null = null;
     private reconciling = false;
+    /**
+     * Chats already reported as unloadable, so the skip is announced once per session instead
+     * of once per scan interval. Cleared on `ready`: a fresh session injects fresh page code,
+     * which may well be able to model what the old one could not.
+     */
+    private readonly unreadableChats = new Set<string>();
+    private bulkChatReadFailed = false;
     private reconcileFailures = 0;
     private reconcileRestarts = 0;
     private reconcileBackoffUntil = 0;
@@ -231,7 +238,7 @@ export class WhatsappService {
                     forwarded: forwardsEverything || allowlist.includes(chatId),
                 });
             } catch (err) {
-                logger.warn('Chat listing: chat would not load', {chatId, err});
+                this.noteUnreadableChat('Chat listing', chatId, err);
                 unreadableChatIds.push(chatId);
             }
         }
@@ -307,6 +314,8 @@ export class WhatsappService {
             this.status = 'ready';
             this.currentQr = null;
             this.clearReadyWatchdog();
+            this.unreadableChats.clear();
+            this.bulkChatReadFailed = false;
             logger.info('WhatsApp client is ready.');
             void this.logWebVersion();
             this.startHeartbeat();
@@ -469,13 +478,46 @@ export class WhatsappService {
         }
 
         try {
-            return await this.client.getChats();
+            const chats = await this.client.getChats();
+            this.bulkChatReadFailed = false;
+            return chats;
         } catch (err) {
             if (this.isTransientFrameError(err)) throw err;
 
-            logger.warn('Reconcile: bulk chat read failed; falling back to per-chat reads.', err);
+            // The chat that rejects the bulk read rejects it on every pass, so say so once and
+            // let the per-chat fallback get on with it.
+            if (this.bulkChatReadFailed) {
+                logger.debug('Reconcile: bulk chat read failed; using per-chat reads.');
+            } else {
+                this.bulkChatReadFailed = true;
+                logger.warn(
+                    'Reconcile: bulk chat read failed; falling back to per-chat reads. ' +
+                        'Further passes log this at debug.',
+                    {reason: this.summarizeError(err)},
+                );
+            }
+
             return this.fetchChatsById(await this.listChatIds());
         }
+    }
+
+    /**
+     * A chat whatsapp-web.js cannot model — a `@lid` thread, a channel, a group shape newer
+     * than the library — does not become readable on the next pass, so warning about it every
+     * scan interval buries the log in a line that carries no new information. Report the id and
+     * its reason once; after that the skip is a debug line.
+     */
+    private noteUnreadableChat(scope: string, chatId: string, err: unknown): void {
+        if (this.unreadableChats.has(chatId)) {
+            logger.debug(`${scope}: skipping a chat that would not load`, {chatId});
+            return;
+        }
+
+        this.unreadableChats.add(chatId);
+        logger.warn(
+            `${scope}: skipping a chat that would not load. Further skips of this chat log at debug.`,
+            {chatId, reason: this.summarizeError(err)},
+        );
     }
 
     private async fetchChatsById(chatIds: readonly string[]): Promise<Chat[]> {
@@ -489,7 +531,7 @@ export class WhatsappService {
                 }
             } catch (err) {
                 if (this.isTransientFrameError(err)) throw err;
-                logger.warn('Reconcile: skipping a chat that would not load', {chatId, err});
+                this.noteUnreadableChat('Reconcile', chatId, err);
             }
         }
 
@@ -830,6 +872,17 @@ export class WhatsappService {
     private describeError(err: unknown): string {
         if (err instanceof Error) {
             return err.stack ?? `${err.name}: ${err.message}`;
+        }
+        return String(err);
+    }
+
+    /**
+     * One line, no stack. Errors thrown inside the page arrive minified — the stack is ten
+     * frames of puppeteer plumbing above a name like `r: r`, which tells nobody anything.
+     */
+    private summarizeError(err: unknown): string {
+        if (err instanceof Error) {
+            return err.message ? `${err.name}: ${err.message}` : err.name;
         }
         return String(err);
     }
