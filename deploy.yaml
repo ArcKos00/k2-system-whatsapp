@@ -29,6 +29,17 @@ data:
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
   WHATSAPP_READY_TIMEOUT_MS: "180000"
   WHATSAPP_RECONCILE_MAX_FAILURES: "3"
+  WHATSAPP_RECONCILE_BACKOFF_MAX_MS: "900000"
+  # Pinning the WhatsApp Web build the session loads. Leave unset and whatsapp-web.js asks for
+  # its own default build; that build is long gone from wa-version, so its cache quietly falls
+  # back to whatever WhatsApp serves today — and the day WhatsApp changes the internals the
+  # injected helpers use, getChats and friends start throwing minified errors.
+  #
+  # Pin it to the build a session was last seen working on. After a deploy the gateway logs
+  # "WhatsApp Web version in use" on ready; take the version from there, confirm the file
+  # exists under https://github.com/wppconnect-team/wa-version/tree/main/html and set it here.
+  # Unset it again to fall back to the library default if a pinned build stops loading.
+  # WHATSAPP_WEB_VERSION: "2.3000.1043840091-alpha"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

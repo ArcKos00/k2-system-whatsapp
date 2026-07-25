@@ -67,6 +67,8 @@ export class WhatsappService {
     private reconcileTimer: ReturnType<typeof setInterval> | null = null;
     private reconciling = false;
     private reconcileFailures = 0;
+    private reconcileRestarts = 0;
+    private reconcileBackoffUntil = 0;
     private cursor = -1;
 
     constructor(private readonly publisher: RabbitMqPublisher) {
@@ -248,6 +250,7 @@ export class WhatsappService {
             this.currentQr = null;
             this.clearReadyWatchdog();
             logger.info('WhatsApp client is ready.');
+            void this.logWebVersion();
             this.startHeartbeat();
             this.startReconcile();
             void this.reconcile();
@@ -347,6 +350,22 @@ export class WhatsappService {
         }
     }
 
+    /**
+     * Records which WhatsApp Web build the session actually loaded. The injected helpers talk
+     * to that build's internals, so when they start throwing this line says what to pin
+     * WHATSAPP_WEB_VERSION to (or which build broke).
+     */
+    private async logWebVersion(): Promise<void> {
+        try {
+            logger.info('WhatsApp Web version in use', {
+                version: await this.client.getWWebVersion(),
+                pinned: config.whatsapp.webVersion ?? null,
+            });
+        } catch (err) {
+            logger.warn('Could not read the WhatsApp Web version', err);
+        }
+    }
+
     private startReconcile(): void {
         const interval = config.whatsapp.reconcileIntervalMs;
         if (interval <= 0 || this.reconcileTimer || !this.publisher.isEnabled) {
@@ -370,7 +389,8 @@ export class WhatsappService {
             !this.reconciling &&
             !this.reinitializing &&
             this.status === 'ready' &&
-            this.cursor >= 0
+            this.cursor >= 0 &&
+            Date.now() >= this.reconcileBackoffUntil
         );
     }
 
@@ -417,6 +437,8 @@ export class WhatsappService {
                 await this.saveCursor();
             }
             this.reconcileFailures = 0;
+            this.reconcileRestarts = 0;
+            this.reconcileBackoffUntil = 0;
             if (published > 0) {
                 logger.info('Reconcile pass complete', {
                     published,
@@ -446,12 +468,35 @@ export class WhatsappService {
 
         const limit = config.whatsapp.reconcileMaxFailures;
         if (limit > 0 && this.reconcileFailures >= limit) {
-            logger.warn('Reconcile: failing persistently; restarting session.', {
-                consecutiveFailures: this.reconcileFailures,
-            });
+            // A restart cures a sick session, not an incompatible one: when the injected page
+            // code no longer matches the WhatsApp Web build it is talking to, the fresh session
+            // fails the same way. So each escalation also pauses scanning for twice as long as
+            // the last, turning a permanent fault into an occasional retry instead of a restart
+            // every few passes. A pass that finally succeeds clears the whole ladder.
+            const pausedForMs = this.nextReconcileBackoffMs();
+
             this.reconcileFailures = 0;
+            this.reconcileRestarts += 1;
+            this.reconcileBackoffUntil = Date.now() + pausedForMs;
+
+            logger.warn('Reconcile: failing persistently; restarting session and pausing scans.', {
+                consecutiveRestarts: this.reconcileRestarts,
+                pausedForMs,
+            });
+
             void this.recoverFromFrameError(err);
         }
+    }
+
+    /**
+     * How long to leave reconcile alone after an escalation: one scan interval, then double
+     * per consecutive restart, up to WHATSAPP_RECONCILE_BACKOFF_MAX_MS.
+     */
+    private nextReconcileBackoffMs(): number {
+        const base = Math.max(1000, config.whatsapp.reconcileIntervalMs);
+        const ceiling = Math.max(base, config.whatsapp.reconcileBackoffMaxMs);
+
+        return Math.min(base * 2 ** this.reconcileRestarts, ceiling);
     }
 
     private buildPayload(message: Message): Record<string, unknown> {

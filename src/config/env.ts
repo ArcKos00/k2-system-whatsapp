@@ -52,6 +52,13 @@ export const config = {
     readyTimeoutMs: num('WHATSAPP_READY_TIMEOUT_MS', 180000),
     reconcileIntervalMs: num('WHATSAPP_RECONCILE_INTERVAL_MS', 30000),
     reconcileMaxFailures: num('WHATSAPP_RECONCILE_MAX_FAILURES', 3),
+    /**
+     * Ceiling on the pause after a reconcile escalation. Each consecutive session restart
+     * doubles the pause (starting at one scan interval) up to this value, so a fault that a
+     * restart cannot fix — an injected-code mismatch with the current WhatsApp Web build,
+     * say — costs one restart per ceiling instead of one every few scans.
+     */
+    reconcileBackoffMaxMs: num('WHATSAPP_RECONCILE_BACKOFF_MAX_MS', 15 * 60 * 1000),
     reconcileLookbackSec: num('WHATSAPP_RECONCILE_LOOKBACK_SEC', 0),
     catchUpLimitPerChat: num('WHATSAPP_CATCHUP_LIMIT_PER_CHAT', 50),
     cursorPath: process.env.WHATSAPP_CURSOR_PATH || undefined,

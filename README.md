@@ -162,3 +162,30 @@ curl -X POST http://localhost:3000/messages/send-with-files \
 - The number is validated with `getNumberId` before sending; unknown numbers
   return `404 WA_NUMBER_NOT_FOUND`.
 - If the client is not connected, sends return `503 WA_NOT_READY`.
+
+### Pinning the WhatsApp Web build
+
+The library's injected helpers (`getChats`, message fetching, …) call into WhatsApp Web's own
+internal modules, so they only work against a build whose internals they still match. When the
+build moves out from under them, calls fail with minified page errors such as `r: r` thrown from
+`Client.getChats`, and no amount of restarting helps — the fresh session loads the same build.
+
+`WHATSAPP_WEB_VERSION` pins the build; `WHATSAPP_WEB_VERSION_REMOTE_PATH` overrides where the
+HTML comes from (by default the matching file in
+[wa-version](https://github.com/wppconnect-team/wa-version/tree/main/html)). Left unset,
+whatsapp-web.js requests its own default build, which is no longer published there, so its cache
+falls back to whatever WhatsApp serves today.
+
+To pin: read the `WhatsApp Web version in use` line the gateway logs when the session turns
+ready, check that `html/<version>.html` exists in wa-version, and set the variable to it. Unset
+it to go back to the library default if a pinned build stops loading, and expect to bump it when
+whatsapp-web.js is upgraded.
+
+### Reconcile back-off
+
+The reconcile loop republishes anything the live listener missed. `WHATSAPP_RECONCILE_MAX_FAILURES`
+consecutive failed passes restart the session; each restart also pauses scanning, starting at one
+`WHATSAPP_RECONCILE_INTERVAL_MS` and doubling per consecutive restart up to
+`WHATSAPP_RECONCILE_BACKOFF_MAX_MS` (15 min by default). A pass that succeeds clears the ladder.
+That way a fault a restart cannot fix — the version mismatch above, typically — costs an
+occasional retry instead of a restart every few passes.
