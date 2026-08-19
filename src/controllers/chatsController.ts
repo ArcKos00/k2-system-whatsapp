@@ -21,9 +21,15 @@ export class ChatsController extends Controller {
     /**
      * List every chat with the id the forward allowlist keys on, newest activity first.
      *
-     * This is how you fill `RABBITMQ_CHAT_IDS`: take the `id` of each chat you want forwarded.
-     * `forwarded` shows what the current allowlist does with the chat, and chats WhatsApp would
-     * not let us read are returned as bare ids under `unreadableChatIds`.
+     * This is how you fill `RABBITMQ_CHAT_IDS`: take the `id` of each chat you want forwarded,
+     * and the same id is what `POST /messages/chat/send` addresses. `forwarded` shows what the
+     * current allowlist does with the chat, and chats WhatsApp would not let us read are
+     * returned as bare ids under `unreadableChatIds`.
+     *
+     * Each chat is described as fully as WhatsApp will allow: the group subject and description
+     * for a group, the saved contact name / business name / push name and the phone number for
+     * a one-to-one chat. `displayName` is always filled, and `nameSource` says which of those
+     * the name came from, so `fallback` marks a chat WhatsApp itself holds no name for.
      */
     @Get()
     @SuccessResponse(200, 'Chats listed')

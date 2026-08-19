@@ -61,6 +61,13 @@ export const config = {
     reconcileBackoffMaxMs: num('WHATSAPP_RECONCILE_BACKOFF_MAX_MS', 15 * 60 * 1000),
     reconcileLookbackSec: num('WHATSAPP_RECONCILE_LOOKBACK_SEC', 0),
     catchUpLimitPerChat: num('WHATSAPP_CATCHUP_LIMIT_PER_CHAT', 50),
+    /**
+     * How many still-nameless chats `GET /chats` may look up one at a time before it gives up
+     * and returns them with only their id. The bulk read names almost every chat; this bounds
+     * the per-chat fallback, which costs a round trip each, on an account with a long tail of
+     * archived threads nobody has a name for. Zero disables the fallback entirely.
+     */
+    chatEnrichLimit: num('WHATSAPP_CHAT_ENRICH_LIMIT', 250),
     cursorPath: process.env.WHATSAPP_CURSOR_PATH || undefined,
     initMaxAttempts: num('WHATSAPP_INIT_MAX_ATTEMPTS', 3),
     initTimeoutMs: num('WHATSAPP_INIT_TIMEOUT_MS', 90000),
