@@ -6,8 +6,12 @@ documented with **Swagger UI**, and DI via **tsyringe**.
 
 ## Features
 
-- `POST /messages/send` — send text + base64 attachments (JSON).
-- `POST /messages/send-with-files` — send text + uploaded files (multipart).
+- `POST /messages/send` — send text + base64 attachments to a phone number (JSON).
+- `POST /messages/send-with-files` — send text + uploaded files to a phone number (multipart).
+- `POST /messages/chat/send` — same, addressed by chat id instead of number (JSON).
+  The only way to reach a **group**.
+- `POST /messages/chat/send-with-files` — same, multipart.
+- `GET /chats` — list every chat with its id and the fullest description WhatsApp will give.
 - `GET /health` — liveness/readiness (unauthenticated).
 - `GET /qr` — login QR as a PNG while authentication is pending (404 once linked).
 - `GET /docs` — Swagger UI; `GET /openapi.json` — raw spec.
@@ -31,10 +35,14 @@ documented with **Swagger UI**, and DI via **tsyringe**.
     ├── ioc.ts                    # tsoa ↔ tsyringe DI bridge
     ├── config/env.ts             # typed env config
     ├── controllers/
-    │   ├── messagesController.ts # @Route('messages') @Security('keycloak')
+    │   ├── messagesController.ts     # @Route('messages')      — send by phone number
+    │   ├── chatMessagesController.ts # @Route('messages/chat') — send by chat id
+    │   ├── chatsController.ts        # @Route('chats')         — list chats
     │   └── healthController.ts
-    ├── services/whatsappService.ts   # initClient() + sendMessage()
-    ├── dtos/sendMessage.dto.ts       # request/response DTOs (drive the OpenAPI spec)
+    ├── services/
+    │   ├── whatsappService.ts        # initClient(), sendMessage(), listChatSummaries()
+    │   └── idempotentSend.ts         # shared idempotency-key handling for every send
+    ├── dtos/                         # request/response DTOs (drive the OpenAPI spec)
     ├── middleware/
     │   ├── authentication.ts     # expressAuthentication() — Keycloak JWT
     │   └── errorHandler.ts
@@ -155,12 +163,41 @@ curl -X POST http://localhost:3000/messages/send-with-files \
   -F "files=@./photo.jpg"
 ```
 
+### Sending to a chat id (groups)
+
+A group has no phone number, so `/messages/send` cannot address one. Take the `id` from
+`GET /chats` and post it to `/messages/chat/send`, which is otherwise identical — same
+throttle, same attachments, same `idempotencyKey`:
+
+```bash
+curl -X POST http://localhost:3000/messages/chat/send \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{ "chatId": "120363412778233770@g.us", "message": "Привіт, команда!" }'
+```
+
+```bash
+curl -X POST http://localhost:3000/messages/chat/send-with-files \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "chatId=120363412778233770@g.us" \
+  -F "message=Документи" \
+  -F "files=@./invoice.pdf"
+```
+
+`chatId` takes the ids exactly as the listing reports them — `@g.us` (group), `@c.us`
+(one-to-one), `@lid` (linked identity), `@newsletter` (channel). A bare number is read as
+`<number>@c.us` and a bare `<a>-<b>` as `<a>-<b>@g.us`, so an id copied without its suffix
+still works. A malformed id returns `422 WA_CHAT_ID_INVALID`; a well-formed id the linked
+account cannot see returns `404 WA_CHAT_NOT_FOUND`.
+
 ## Notes on reliability / anti-ban
 
 - `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
   for bulk sending. WhatsApp may ban numbers that automate aggressively.
 - The number is validated with `getNumberId` before sending; unknown numbers
-  return `404 WA_NUMBER_NOT_FOUND`.
+  return `404 WA_NUMBER_NOT_FOUND`. A chat id is checked against the chats the account
+  actually has, and an unknown one returns `404 WA_CHAT_NOT_FOUND` (a `@c.us` id the
+  account has never talked to still falls back to the number check, since sending opens
+  that chat).
 - If the client is not connected, sends return `503 WA_NOT_READY`.
 
 ### Pinning the WhatsApp Web build
@@ -187,13 +224,38 @@ whatsapp-web.js is upgraded.
 phone. `GET /chats` lists them:
 
 ```bash
-curl -s https://<host>/whatsapp/chats | jq '.chats[] | {id, name, isGroup, forwarded}'
+curl -s https://<host>/whatsapp/chats | jq '.chats[] | {id, displayName, kind, forwarded}'
 ```
 
 Groups end in `@g.us`, one-to-one chats in `@c.us`, linked-identity threads in `@lid`.
 `forwarded` says what the allowlist currently in force does with each chat, and `allowlist`
 echoes that configuration back. Chats WhatsApp would not let the library model come back as
 bare ids in `unreadableChatIds` — reconcile skips those too.
+
+#### How chats are described
+
+`whatsapp-web.js` exposes only `formattedTitle`, which WhatsApp leaves empty for exactly the
+chats that most need a name: a group whose metadata the account has not synced, and anyone who
+is not in the phone's address book. The listing therefore reads WhatsApp's own in-page chat
+models directly, in one page call, and pulls out everything they carry:
+
+| field | where it comes from |
+| --- | --- |
+| `subject`, `description`, `participantCount` | group metadata — this is what names an unnamed group |
+| `contactName`, `pushName`, `verifiedName`, `isMyContact` | the contact record behind a one-to-one chat |
+| `phoneNumber` | the contact's number; for a `@lid` thread, resolved through WhatsApp's own lid→number mapping |
+| `kind` | `group` / `private` / `lid` / `channel` / `broadcast`, read off the id |
+| `isReadOnly`, `archived`, `timestamp`, `unreadCount` | the chat model |
+
+`name` is the best of those, and `nameSource` says which one it is — so `number` means WhatsApp
+only had a phone number and `fallback` means it had nothing at all. `displayName` is never
+empty; it falls back to the id's user part. `unnamedCount` in the response counts how many
+chats ended up with no name.
+
+Any chat still nameless after the bulk read gets a second, per-chat pass: `getChatById` forces
+WhatsApp to fetch the group metadata, and `getContactById` asks for a contact it has not pushed
+to us. Those are round trips, so `WHATSAPP_CHAT_ENRICH_LIMIT` (default 250) caps how many one
+listing will do; anything past the cap is returned with its id only and logged as a warning.
 
 Without the endpoint the ids are also visible in the logs: every inbound message logs its
 `chatId`, whether it was forwarded or dropped by the allowlist.

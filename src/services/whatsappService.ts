@@ -9,9 +9,11 @@ import {singleton} from 'tsyringe';
 import {config} from '../config/env';
 import {logger} from '../utils/logger';
 import {RabbitMqPublisher} from './rabbitMqPublisher';
-import type {ChatListResponse, ChatSummaryDto} from '../dtos/chat.dto';
+import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
     BadAttachmentError,
+    ChatNotFoundError,
+    InvalidChatIdError,
     MessageSendError,
     NumberNotFoundError,
     WhatsAppNotReadyError,
@@ -25,7 +27,53 @@ export interface MediaAttachment {
     filename?: string;
 }
 
+/** What every send path returns, whether it was addressed by number or by chat id. */
+export interface SendResult {
+    success: boolean;
+    chatId: string;
+    sentMessages: number;
+}
+
 export type WhatsAppStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected';
+
+/**
+ * Everything WhatsApp's own in-page chat model knows about one chat, read straight out of the
+ * collection instead of through the library's serializer.
+ *
+ * The serializer only ever gives us `formattedTitle`, which is empty for exactly the chats that
+ * need a name most: a group whose metadata has not synced, or a stranger who is not in the
+ * phone's address book. Reading the model lets us fall back to the group subject, the contact
+ * record and finally the number, and it does it for the whole list in one page call.
+ */
+interface ChatDescriptor {
+    id: string;
+    title?: string;
+    subject?: string;
+    description?: string;
+    participantCount?: number;
+    contactName?: string;
+    pushName?: string;
+    verifiedName?: string;
+    phoneNumber?: string;
+    isMyContact?: boolean;
+    isGroup?: boolean;
+    isReadOnly?: boolean;
+    archived?: boolean;
+    timestamp?: number;
+    unreadCount?: number;
+}
+
+/** Chat id servers the gateway will send to, and how the odd spellings map onto them. */
+const CHAT_SERVERS = new Set(['c.us', 'g.us', 'lid', 'newsletter', 'broadcast']);
+
+const CHAT_KIND_BY_SERVER: Record<string, ChatKind> = {
+    'c.us': 'private',
+    'g.us': 'group',
+    lid: 'lid',
+    newsletter: 'channel',
+    broadcast: 'broadcast',
+};
+
 
 const TRANSIENT_FRAME_ERROR =
     /detached Frame|Execution context was destroyed|Session closed|Target closed|Protocol error|Most likely the page has been closed/i;
@@ -171,15 +219,42 @@ export class WhatsappService {
         phoneNumber: string,
         message?: string,
         files: MediaAttachment[] = [],
-    ): Promise<{ success: boolean; chatId: string; sentMessages: number }> {
+    ): Promise<SendResult> {
+        this.assertSendable(message, files);
+        return this.dispatch(await this.resolveChatId(phoneNumber), message, files);
+    }
+
+    /**
+     * Send to a chat addressed by its WhatsApp id rather than by phone number.
+     *
+     * A group has no number to resolve, so this is the only way to reach one; for a one-to-one
+     * chat it also skips the `getNumberId` round trip, since an id the account already has a
+     * chat for is by definition reachable.
+     */
+    public async sendMessageToChat(
+        chatId: string,
+        message?: string,
+        files: MediaAttachment[] = [],
+    ): Promise<SendResult> {
+        this.assertSendable(message, files);
+        return this.dispatch(await this.resolveTargetChatId(chatId), message, files);
+    }
+
+    private assertSendable(message: string | undefined, files: MediaAttachment[]): void {
         if (!this.isReady()) {
             throw new WhatsAppNotReadyError();
         }
         if (!message?.trim() && files.length === 0) {
             throw new MessageSendError('Either a message body or at least one file is required.');
         }
+    }
 
-        const chatId = await this.resolveChatId(phoneNumber);
+    /** The send itself, once the target chat id is settled. */
+    private async dispatch(
+        chatId: string,
+        message: string | undefined,
+        files: MediaAttachment[],
+    ): Promise<SendResult> {
         let sentMessages = 0;
 
         try {
@@ -209,10 +284,14 @@ export class WhatsappService {
     }
 
     /**
-     * Every chat the linked account can see, with the id the forward allowlist keys on. A chat
-     * WhatsApp will not let the library model is reported by id under `unreadableChatIds`
-     * rather than failing the listing — the same failure that used to sink whole reconcile
-     * passes.
+     * Every chat the linked account can see, described as fully as WhatsApp will let us.
+     *
+     * The bulk read comes from the in-page chat models, which carry the group subject and the
+     * contact record the library's own serializer drops — that is what used to leave most of
+     * this listing nameless. Chats still unnamed after that get a second, per-chat pass:
+     * `getChatById` forces a group-metadata fetch and `getContactById` asks for the contact
+     * WhatsApp has not pushed to us yet. A chat WhatsApp will not let the library model at all
+     * is reported by id under `unreadableChatIds` rather than failing the listing.
      */
     public async listChatSummaries(): Promise<ChatListResponse> {
         if (!this.isReady()) {
@@ -222,30 +301,233 @@ export class WhatsappService {
         const allowlist = config.rabbitmq.chatIds;
         const forwardsEverything = allowlist.length === 0;
 
-        const chats: ChatSummaryDto[] = [];
         const unreadableChatIds: string[] = [];
+        const descriptors = await this.readChatDescriptors(unreadableChatIds);
+
+        const chats: ChatSummaryDto[] = [];
+        let enrichBudget = config.whatsapp.chatEnrichLimit;
+        let notEnriched = 0;
+
+        for (const descriptor of descriptors) {
+            let enriched = descriptor;
+            if (!this.isDescribed(descriptor)) {
+                if (enrichBudget > 0) {
+                    enrichBudget -= 1;
+                    enriched = await this.enrichDescriptor(descriptor, unreadableChatIds);
+                } else {
+                    notEnriched += 1;
+                }
+            }
+
+            chats.push(
+                this.toChatSummary(enriched, forwardsEverything || allowlist.includes(enriched.id)),
+            );
+        }
+
+        if (notEnriched > 0) {
+            logger.warn(
+                'Chat listing: hit WHATSAPP_CHAT_ENRICH_LIMIT; some chats were returned without ' +
+                    'their per-chat lookup. Raise the limit to describe them.',
+                {notEnriched, limit: config.whatsapp.chatEnrichLimit},
+            );
+        }
+
+        chats.sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
+
+        const unnamedCount = chats.filter((chat) => !chat.name).length;
+        if (unnamedCount > 0) {
+            logger.info('Chat listing: some chats have no name WhatsApp will disclose', {
+                unnamedCount,
+                total: chats.length,
+            });
+        }
+
+        return {
+            chats,
+            unreadableChatIds: [...new Set(unreadableChatIds)],
+            allowlist: [...allowlist],
+            unnamedCount,
+        };
+    }
+
+    /**
+     * Descriptors for every chat, preferring the one bulk page read and falling back to reading
+     * ids and describing them one at a time when the page call will not answer.
+     */
+    private async readChatDescriptors(unreadableChatIds: string[]): Promise<ChatDescriptor[]> {
+        try {
+            return await this.listChatDescriptors();
+        } catch (err) {
+            logger.warn('Chat listing: bulk descriptor read failed; describing chats one by one.', {
+                reason: this.summarizeError(err),
+            });
+        }
+
+        const descriptors: ChatDescriptor[] = [];
 
         for (const chatId of await this.listChatIds()) {
             try {
-                const chat = await this.client.getChatById(chatId);
-
-                chats.push({
-                    id: chat?.id?._serialized ?? chatId,
-                    name: chat?.name,
-                    isGroup: chat?.isGroup,
-                    timestamp: chat?.timestamp,
-                    unreadCount: chat?.unreadCount,
-                    forwarded: forwardsEverything || allowlist.includes(chatId),
-                });
+                descriptors.push(await this.enrichDescriptor({id: chatId}, unreadableChatIds));
             } catch (err) {
                 this.noteUnreadableChat('Chat listing', chatId, err);
                 unreadableChatIds.push(chatId);
             }
         }
 
-        chats.sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
+        return descriptors;
+    }
 
-        return {chats, unreadableChatIds, allowlist: [...allowlist]};
+    /**
+     * Whether the descriptor already carries something worth showing a human.
+     *
+     * A title that is only a phone number does not count. WhatsApp fills the chat title with a
+     * formatted number whenever it has no name, so treating that as described would skip the
+     * very chats the per-chat lookup exists for.
+     */
+    private isDescribed(descriptor: ChatDescriptor): boolean {
+        return [
+            descriptor.title,
+            descriptor.subject,
+            descriptor.contactName,
+            descriptor.verifiedName,
+            descriptor.pushName,
+        ].some((value) => Boolean(value) && !this.looksLikePhoneNumber(value as string));
+    }
+
+    /** A name WhatsApp synthesised from the number rather than one a human chose. */
+    private looksLikePhoneNumber(value: string): boolean {
+        return /^[+\s().\d-]+$/.test(value);
+    }
+
+    /**
+     * Second pass for a chat the collection could not name. `getChatById` makes the library
+     * fetch group metadata from the server, which is what fills in a subject and description
+     * the account has never synced; `getContactById` does the same for a one-to-one chat.
+     * Both are per-chat round trips, so only chats that need them pay for them.
+     */
+    private async enrichDescriptor(
+        descriptor: ChatDescriptor,
+        unreadableChatIds: string[],
+    ): Promise<ChatDescriptor> {
+        const enriched: ChatDescriptor = {...descriptor};
+
+        try {
+            const chat = await this.client.getChatById(descriptor.id);
+            if (chat) {
+                enriched.title ??= this.text(chat.name);
+                enriched.isGroup ??= chat.isGroup;
+                enriched.isReadOnly ??= chat.isReadOnly;
+                enriched.archived ??= chat.archived;
+                enriched.timestamp ??= chat.timestamp;
+                enriched.unreadCount ??= chat.unreadCount;
+
+                const metadata = (chat as unknown as {groupMetadata?: Record<string, unknown>})
+                    .groupMetadata;
+                if (metadata) {
+                    enriched.isGroup = true;
+                    enriched.subject ??= this.text(metadata.subject);
+                    enriched.description ??= this.text(metadata.desc);
+                    enriched.participantCount ??= Array.isArray(metadata.participants)
+                        ? metadata.participants.length
+                        : undefined;
+                }
+            }
+        } catch (err) {
+            if (this.isTransientFrameError(err)) throw err;
+            // The chat is still listed — the bulk read already gave us its id and whatever else
+            // it carried — but say which chats WhatsApp would not model, the way it always has.
+            this.noteUnreadableChat('Chat listing', descriptor.id, err);
+            unreadableChatIds.push(descriptor.id);
+        }
+
+        // Groups have no single contact behind them; a `@lid` thread does, and its contact is
+        // usually the only place the number and push name are recorded.
+        if (enriched.isGroup || !(descriptor.id.endsWith('@c.us') || descriptor.id.endsWith('@lid'))) {
+            return enriched;
+        }
+
+        try {
+            const contact = await this.client.getContactById(descriptor.id);
+            if (contact) {
+                enriched.contactName ??= this.text(contact.name);
+                enriched.pushName ??= this.text(contact.pushname);
+                enriched.verifiedName ??= this.text(contact.verifiedName);
+                enriched.phoneNumber ??= this.text(contact.number);
+                enriched.isMyContact ??= contact.isMyContact;
+            }
+        } catch (err) {
+            if (this.isTransientFrameError(err)) throw err;
+            logger.debug('Chat listing: could not load a contact for its name', {
+                chatId: descriptor.id,
+                reason: this.summarizeError(err),
+            });
+        }
+
+        return enriched;
+    }
+
+    /**
+     * Picks the name to show and says where it came from, so a caller can tell an unnamed chat
+     * apart from one the gateway failed to read. Saved contact name first because that is what
+     * the phone shows, then the group subject, then what the counterpart calls themselves, and
+     * only then the bare number.
+     */
+    private toChatSummary(descriptor: ChatDescriptor, forwarded: boolean): ChatSummaryDto {
+        const server = descriptor.id.slice(descriptor.id.lastIndexOf('@') + 1).toLowerCase();
+        const kind: ChatKind = CHAT_KIND_BY_SERVER[server] ?? 'unknown';
+        const user = descriptor.id.slice(0, Math.max(descriptor.id.lastIndexOf('@'), 0));
+
+        const candidates: [ChatNameSource, string | undefined][] = [
+            ['title', descriptor.title],
+            ['subject', descriptor.subject],
+            ['contact', descriptor.contactName],
+            ['verifiedName', descriptor.verifiedName],
+            ['pushname', descriptor.pushName],
+            [
+                'number',
+                // A `@lid` thread counts here too: the linked identity hides the number in the
+                // id, but once it is resolved it is the only human-readable thing we have.
+                (kind === 'private' || kind === 'lid') && descriptor.phoneNumber
+                    ? `+${descriptor.phoneNumber}`
+                    : undefined,
+            ],
+        ];
+        // A name a human chose wins; failing that we report the best number-shaped name we have
+        // and say so, rather than passing a formatted number off as a contact name.
+        const named = candidates.find(
+            ([source, value]) =>
+                Boolean(value) && source !== 'number' && !this.looksLikePhoneNumber(value as string),
+        );
+        const fallbackValue = candidates.find(([, value]) => Boolean(value))?.[1];
+        const resolved: [ChatNameSource, string] | undefined =
+            (named as [ChatNameSource, string] | undefined) ??
+            (fallbackValue ? ['number', fallbackValue] : undefined);
+
+        return {
+            id: descriptor.id,
+            name: resolved?.[1],
+            displayName: resolved?.[1] || user || descriptor.id,
+            nameSource: resolved?.[0] ?? 'fallback',
+            kind,
+            isGroup: descriptor.isGroup ?? kind === 'group',
+            subject: descriptor.subject,
+            description: descriptor.description,
+            participantCount: descriptor.participantCount,
+            phoneNumber: descriptor.phoneNumber,
+            pushName: descriptor.pushName,
+            verifiedName: descriptor.verifiedName,
+            isMyContact: descriptor.isMyContact,
+            isReadOnly: descriptor.isReadOnly,
+            archived: descriptor.archived,
+            timestamp: descriptor.timestamp,
+            unreadCount: descriptor.unreadCount,
+            forwarded,
+        };
+    }
+
+    private text(value: unknown): string | undefined {
+        const trimmed = typeof value === 'string' ? value.trim() : '';
+        return trimmed.length > 0 ? trimmed : undefined;
     }
 
     public async getQrPng(): Promise<Buffer | null> {
@@ -565,6 +847,153 @@ export class WhatsappService {
         });
     }
 
+    /**
+     * Describes every chat in a single page call, reading WhatsApp's own chat models directly.
+     *
+     * Why not `client.getChats()`: its serializer exposes only `formattedTitle`, which WhatsApp
+     * leaves empty for an unsynced group and for anyone who is not in the phone's address book,
+     * and one chat it cannot model rejects the whole call. Here each chat is read behind its own
+     * `try`, every field is optional, and a chat that yields nothing but an id still comes back
+     * as a row — so a page fault costs that chat's description, never the listing.
+     */
+    private async listChatDescriptors(): Promise<ChatDescriptor[]> {
+        const page = this.client.pupPage;
+        if (!page) {
+            return [];
+        }
+
+        return page.evaluate(() => {
+            type Loose = Record<string, unknown>;
+
+            // globalThis, not window: the project compiles without the DOM lib, and inside the
+            // page the two are the same object anyway.
+            const load = (module: string): Loose | undefined => {
+                try {
+                    return (
+                        globalThis as unknown as {require: (name: string) => Loose}
+                    ).require(module);
+                } catch {
+                    return undefined;
+                }
+            };
+
+            // Every read goes through here: these are WhatsApp's own getters, and one of them
+            // throwing on one chat must not cost the other fields, let alone the other chats.
+            const read = (get: () => unknown): unknown => {
+                try {
+                    return get();
+                } catch {
+                    return undefined;
+                }
+            };
+
+            const text = (get: () => unknown): string | undefined => {
+                const value = read(get);
+                const trimmed = typeof value === 'string' ? value.trim() : '';
+                return trimmed.length > 0 ? trimmed : undefined;
+            };
+
+            const numberOf = (get: () => unknown): number | undefined => {
+                const value = read(get);
+                return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+            };
+
+            const boolOf = (get: () => unknown): boolean | undefined => {
+                const value = read(get);
+                return typeof value === 'boolean' ? value : undefined;
+            };
+
+            const countOf = (collection: unknown): number | undefined => {
+                if (Array.isArray(collection)) return collection.length;
+                const loose = collection as Loose | undefined;
+                if (typeof loose?.length === 'number') return loose.length;
+                const models = read(() =>
+                    (loose as {getModelsArray?: () => unknown[]})?.getModelsArray?.(),
+                );
+                return Array.isArray(models) ? models.length : undefined;
+            };
+
+            const collections = load('WAWebCollections');
+            const chatCollection = collections?.Chat as
+                | {getModelsArray: () => Loose[]}
+                | undefined;
+            if (!chatCollection) {
+                return [];
+            }
+
+            const lidUtils = load('WAWebLidMigrationUtils') as
+                | {toPn?: (wid: unknown) => {user?: string} | undefined}
+                | undefined;
+
+            const digits = (value: unknown): string | undefined => {
+                const trimmed = typeof value === 'string' ? value.replace(/\D/g, '') : '';
+                return trimmed.length > 0 ? trimmed : undefined;
+            };
+
+            const describe = (chat: Loose): Loose | null => {
+                const id = read(() => (chat?.id as Loose)?._serialized);
+                if (typeof id !== 'string' || !id) {
+                    return null;
+                }
+
+                const contact = read(() => chat.contact) as Loose | undefined;
+                const metadata = read(() => chat.groupMetadata) as Loose | undefined;
+                const newsletter = read(() => chat.newsletterMetadata) as Loose | undefined;
+
+                // A `@lid` chat hides the number behind a linked identity; WhatsApp's own
+                // migration helper is what maps it back to a phone number.
+                const lidNumber = id.endsWith('@lid')
+                    ? digits(read(() => lidUtils?.toPn?.(chat.id)?.user))
+                    : undefined;
+
+                return {
+                    id,
+                    title:
+                        text(() => chat.formattedTitle) ??
+                        text(() => chat.name) ??
+                        text(() => (contact as Loose | undefined)?.formattedName),
+                    subject:
+                        text(() => metadata?.subject) ??
+                        text(() => chat.subject) ??
+                        text(() => newsletter?.name),
+                    description:
+                        text(() => metadata?.desc) ?? text(() => newsletter?.description),
+                    participantCount: countOf(metadata?.participants),
+                    contactName: text(() => contact?.name) ?? text(() => contact?.shortName),
+                    pushName:
+                        text(() => contact?.pushname) ?? text(() => contact?.notifyName),
+                    verifiedName: text(() => contact?.verifiedName),
+                    phoneNumber:
+                        lidNumber ??
+                        digits(read(() => (contact?.id as Loose | undefined)?.user)) ??
+                        (id.endsWith('@c.us') ? digits(id.split('@')[0]) : undefined),
+                    isMyContact: boolOf(() => contact?.isMyContact),
+                    isGroup: Boolean(metadata) || id.endsWith('@g.us'),
+                    isReadOnly:
+                        boolOf(() => chat.isReadOnly) ?? boolOf(() => metadata?.announce),
+                    archived: boolOf(() => chat.archive),
+                    timestamp: numberOf(() => chat.t),
+                    unreadCount: numberOf(() => chat.unreadCount),
+                };
+            };
+
+            const models = read(() => chatCollection.getModelsArray());
+            if (!Array.isArray(models)) {
+                return [];
+            }
+
+            return models
+                .map((chat) => {
+                    try {
+                        return describe(chat as Loose);
+                    } catch {
+                        return null;
+                    }
+                })
+                .filter((descriptor): descriptor is Loose => descriptor !== null);
+        }) as unknown as Promise<ChatDescriptor[]>;
+    }
+
     private async reconcile(): Promise<void> {
         if (!this.canReconcile()) return;
 
@@ -763,6 +1192,80 @@ export class WhatsappService {
                 }
             }),
         );
+    }
+
+    /**
+     * Turns whatever the caller passed into a chat id WhatsApp will accept, or says why it is
+     * not one. A bare number is read as a one-to-one chat and a bare `<creator>-<created>` as a
+     * group, because those are the shapes people copy out of the listing without the suffix.
+     */
+    private normalizeChatId(rawChatId: string): string {
+        const trimmed = (rawChatId ?? '').trim();
+        if (!trimmed) {
+            throw new InvalidChatIdError(rawChatId ?? '');
+        }
+
+        const at = trimmed.lastIndexOf('@');
+        if (at < 0) {
+            if (/^\d+-\d+$/.test(trimmed)) return `${trimmed}@g.us`;
+            if (/^\d{5,}$/.test(trimmed)) return `${trimmed}@c.us`;
+            throw new InvalidChatIdError(trimmed);
+        }
+
+        const user = trimmed.slice(0, at);
+        const rawServer = trimmed.slice(at + 1).toLowerCase();
+        // `s.whatsapp.net` is the same address in the protocol's own spelling; callers copying
+        // ids out of other WhatsApp tooling hit it often enough to be worth accepting.
+        const server = rawServer === 's.whatsapp.net' ? 'c.us' : rawServer;
+
+        if (!user || !CHAT_SERVERS.has(server)) {
+            throw new InvalidChatIdError(trimmed);
+        }
+        if (server !== 'broadcast' && !/^\d+(-\d+)?$/.test(user)) {
+            throw new InvalidChatIdError(trimmed);
+        }
+
+        return `${user}@${server}`;
+    }
+
+    /**
+     * The chat id a send should go to. An id the account already has a chat for is taken as is;
+     * a one-to-one id it has never talked to is checked against WhatsApp, since sending opens
+     * that chat; anything else the account cannot see is a 404, because a group you are not in
+     * is not reachable by sending to it.
+     */
+    private async resolveTargetChatId(rawChatId: string): Promise<string> {
+        const chatId = this.normalizeChatId(rawChatId);
+
+        let knownIds: string[];
+        try {
+            knownIds = await this.listChatIds();
+        } catch (err) {
+            // The membership check is a courtesy. A page that will not answer must not block a
+            // send WhatsApp would have accepted.
+            logger.debug('Could not read the chat list while resolving a send target', {
+                chatId,
+                reason: this.summarizeError(err),
+            });
+            return chatId;
+        }
+
+        if (knownIds.includes(chatId)) {
+            return chatId;
+        }
+
+        if (chatId.endsWith('@c.us')) {
+            try {
+                return await this.resolveChatId(chatId.slice(0, -'@c.us'.length));
+            } catch (err) {
+                if (err instanceof NumberNotFoundError) {
+                    throw new ChatNotFoundError(chatId);
+                }
+                throw err;
+            }
+        }
+
+        throw new ChatNotFoundError(chatId);
     }
 
     private async resolveChatId(phoneNumber: string): Promise<string> {

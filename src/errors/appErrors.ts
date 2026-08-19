@@ -59,3 +59,26 @@ export class ForbiddenError extends AppError {
     super(message, 403, 'FORBIDDEN');
   }
 }
+
+/**
+ * The caller passed something that is not a WhatsApp chat id. Kept separate from
+ * `ChatNotFoundError` because the fix is different: this one is a malformed request,
+ * not a chat the account cannot see.
+ */
+export class InvalidChatIdError extends AppError {
+  constructor(chatId: string) {
+    super(
+      `'${chatId}' is not a WhatsApp chat id. Expected '<id>@c.us' (one-to-one), ` +
+        `'<id>@g.us' (group), '<id>@lid', '<id>@newsletter' or '<id>@broadcast'.`,
+      422,
+      'WA_CHAT_ID_INVALID',
+    );
+  }
+}
+
+/** A well-formed chat id the linked account cannot see, so there is nothing to send to. */
+export class ChatNotFoundError extends AppError {
+  constructor(chatId: string) {
+    super(`Chat is not available to the linked WhatsApp account: ${chatId}`, 404, 'WA_CHAT_NOT_FOUND');
+  }
+}
