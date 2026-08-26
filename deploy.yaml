@@ -112,7 +112,7 @@ spec:
                 name: rabbitmq-config
           volumeMounts:
             - name: data
-              mountPath: /app/data
+              mountPath: /app/data/${SERVICE_NAME}
           # Give the WhatsApp client time to connect / wait for QR login before
           # liveness starts killing the pod.
           startupProbe:
