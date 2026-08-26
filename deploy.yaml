@@ -5,16 +5,22 @@
 # (create the namespace once: kubectl create namespace k2-system)
 #
 # Notes:
-#   * Single replica only — whatsapp-web.js keeps a LocalAuth session and a
+#   * Single replica per instance — whatsapp-web.js keeps a LocalAuth session and a
 #     headless-Chrome process that cannot be shared across pods.
-#   * The session is persisted on a PVC; losing it forces a new QR login.
+#   * Several instances (one Deployment each, distinct ${SERVICE_NAME}) may share the
+#     whatsapp-data PVC: every instance mounts it with subPath ${SERVICE_NAME}, so each
+#     sees only its own folder of the volume and their sessions never touch. While the
+#     PVC is ReadWriteOnce all instances must land on the same node.
+#   * The session is persisted on the PVC; losing it forces a new QR login.
 #   * /health is unauthenticated so probes work without a token.
 # =============================================================================
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: whatsapp-api-config
+  # Per-instance: each ${SERVICE_NAME} carries its own config, so two instances may
+  # differ in client id, allowlist or pinned WA Web build without touching each other.
+  name: ${SERVICE_NAME}-config
   namespace: ${NAMESPACE}
 data:
   PORT: "3000"
@@ -44,6 +50,8 @@ data:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  # Deliberately NOT ${SERVICE_NAME}-scoped: this is the one volume every instance
+  # shares; each instance claims its own folder on it via the mount's subPath.
   name: whatsapp-data
   namespace: ${NAMESPACE}
 spec:
@@ -87,6 +95,32 @@ spec:
         runAsUser: 1000
         seccompProfile:
           type: RuntimeDefault
+      # kubelet creates a missing subPath directory as root:root, and fsGroup does not
+      # reliably reach through a subPath mount — so the instance's folder is prepared
+      # here, on the volume root, before the app container ever mounts it.
+      initContainers:
+        - name: prepare-data-dir
+          image: "${REPOSITORY}:${IMAGE_TAG}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - mkdir -p "/volume/${SERVICE_NAME}" && chown -R 1000:1000 "/volume/${SERVICE_NAME}"
+          securityContext:
+            # The one container allowed to be root: it exists to hand the folder to uid 1000.
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+          volumeMounts:
+            # The volume ROOT, deliberately without subPath — the folder is made from outside.
+            - name: data
+              mountPath: /volume
       containers:
         - name: ${SERVICE_NAME}
           # Built from this repo's Dockerfile and pushed to your registry.
@@ -105,14 +139,18 @@ spec:
               containerPort: 3000
           envFrom:
             - configMapRef:
-                name: whatsapp-api-config
+                name: ${SERVICE_NAME}-config
             - configMapRef:
                 name: whatsapp-to-rabbit-config
             - configMapRef:
                 name: rabbitmq-config
           volumeMounts:
+            # The PVC is shared between instances; subPath keeps each one inside its own
+            # folder of the volume while the container keeps seeing plain /app/data — so
+            # WHATSAPP_SESSION_PATH and the idempotency store need no per-instance values.
             - name: data
-              mountPath: /app/data/${SERVICE_NAME}
+              mountPath: /app/data
+              subPath: ${SERVICE_NAME}
           # Give the WhatsApp client time to connect / wait for QR login before
           # liveness starts killing the pod.
           startupProbe:
