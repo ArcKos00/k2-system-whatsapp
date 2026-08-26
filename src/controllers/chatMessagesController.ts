@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   FormField,
+  OperationId,
   Post,
   Response,
   Route,
@@ -49,6 +50,7 @@ export class ChatMessagesController extends Controller {
    * message twice, it replays the first result instead.
    */
   @Post('send')
+  @OperationId('SendToChat')
   @SuccessResponse(202, 'Accepted — message dispatched')
   @Response<ErrorResponse>(409, 'A send with the same idempotency key is in flight')
   @Response<ErrorResponse>(422, 'Validation failed, or the chat id is malformed')
@@ -72,6 +74,7 @@ export class ChatMessagesController extends Controller {
    * Files are received in memory and forwarded as WhatsApp MessageMedia.
    */
   @Post('send-with-files')
+  @OperationId('SendToChatWithFiles')
   @SuccessResponse(202, 'Accepted — message dispatched')
   @Response<ErrorResponse>(400, 'Invalid attachment')
   @Response<ErrorResponse>(409, 'A send with the same idempotency key is in flight')
