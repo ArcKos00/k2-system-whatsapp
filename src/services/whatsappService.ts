@@ -249,25 +249,36 @@ export class WhatsappService {
         }
     }
 
-    /** The send itself, once the target chat id is settled. */
+    /**
+     * The send itself, once the target chat id is settled.
+     *
+     * When files are attached the text travels as the caption of the first one, so the
+     * recipient sees a single message rather than a text bubble followed by the file; any
+     * further files go out on their own. Text without files is sent as a plain message.
+     */
     private async dispatch(
         chatId: string,
         message: string | undefined,
         files: MediaAttachment[],
     ): Promise<SendResult> {
         let sentMessages = 0;
+        const text = message?.trim() ? message : undefined;
 
         try {
-            if (message?.trim()) {
+            if (text && files.length === 0) {
                 await this.throttle();
-                await this.client.sendMessage(chatId, message);
+                await this.client.sendMessage(chatId, text);
                 sentMessages += 1;
             }
 
-            for (const file of files) {
+            for (const [index, file] of files.entries()) {
                 const media = this.toMessageMedia(file);
                 await this.throttle();
-                await this.client.sendMessage(chatId, media);
+                if (index === 0 && text) {
+                    await this.client.sendMessage(chatId, media, {caption: text});
+                } else {
+                    await this.client.sendMessage(chatId, media);
+                }
                 sentMessages += 1;
             }
         } catch (err) {

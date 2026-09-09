@@ -33,7 +33,8 @@ export interface SendMessageDto {
   phoneNumber: string;
 
   /**
-   * Text body of the message. Optional when at least one file is attached.
+   * Text body of the message. Optional when at least one file is attached; when files are
+   * attached it is delivered as the caption of the first file, in the same message.
    * @example "Вітаємо! Ваше замовлення прийнято."
    */
   message?: string;
@@ -59,7 +60,11 @@ export interface SendMessageResponse {
   success: boolean;
   /** Resolved WhatsApp chat id, e.g. `380501234567@c.us`. */
   chatId: string;
-  /** Number of individual WhatsApp messages dispatched (text + each file). */
+  /**
+   * Number of individual WhatsApp messages dispatched. With attachments the text is sent
+   * as the caption of the first file, so this equals the number of files; without
+   * attachments it is 1.
+   */
   sentMessages: number;
   /**
    * True when this response replays an earlier send matched by `idempotencyKey`,

@@ -14,7 +14,8 @@ export interface SendToChatDto {
   chatId: string;
 
   /**
-   * Text body of the message. Optional when at least one file is attached.
+   * Text body of the message. Optional when at least one file is attached; when files are
+   * attached it is delivered as the caption of the first file, in the same message.
    * @example "Вітаємо! Ваше замовлення прийнято."
    */
   message?: string;
