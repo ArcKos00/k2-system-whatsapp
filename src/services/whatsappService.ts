@@ -8,6 +8,7 @@ import {dirname, join} from 'node:path';
 import {singleton} from 'tsyringe';
 import {config} from '../config/env';
 import {logger} from '../utils/logger';
+import {canSendInline, resolveMimetype} from '../utils/mediaKind';
 import {RabbitMqPublisher} from './rabbitMqPublisher';
 import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
@@ -255,6 +256,11 @@ export class WhatsappService {
      * When files are attached the text travels as the caption of the first one, so the
      * recipient sees a single message rather than a text bubble followed by the file; any
      * further files go out on their own. Text without files is sent as a plain message.
+     *
+     * A photo, video or audio file is sent as inline media first, so it shows up as a real
+     * picture or player in the chat. Only when WhatsApp refuses it that way — an image too
+     * large to preview, a codec it cannot transcode — is the same file re-sent as a document,
+     * which WhatsApp accepts for anything. Every other file type is a document from the start.
      */
     private async dispatch(
         chatId: string,
@@ -273,12 +279,9 @@ export class WhatsappService {
 
             for (const [index, file] of files.entries()) {
                 const media = this.toMessageMedia(file);
+                const caption = index === 0 ? text : undefined;
                 await this.throttle();
-                if (index === 0 && text) {
-                    await this.client.sendMessage(chatId, media, {caption: text});
-                } else {
-                    await this.client.sendMessage(chatId, media);
-                }
+                await this.sendMedia(chatId, media, caption);
                 sentMessages += 1;
             }
         } catch (err) {
@@ -1311,21 +1314,64 @@ export class WhatsappService {
         return numberId._serialized;
     }
 
+    /**
+     * One attachment, inline if WhatsApp can show it that way, as a document otherwise.
+     *
+     * The inline attempt is the one that can fail on the file itself rather than on the
+     * connection: WhatsApp Web validates and transcodes photos and videos before upload, and
+     * rejects what it cannot handle. A document upload skips all of that, so it is the safe
+     * second try. Connection-level failures are not retried here — the caller already turns
+     * them into a reconnect.
+     */
+    private async sendMedia(chatId: string, media: MessageMedia, caption: string | undefined): Promise<void> {
+        const options = caption ? {caption} : {};
+        if (!canSendInline(media.mimetype)) {
+            await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
+            return;
+        }
+
+        try {
+            await this.client.sendMessage(chatId, media, options);
+        } catch (err) {
+            if (this.isTransientFrameError(err)) throw err;
+            logger.warn('Inline media rejected, re-sending as document', {
+                chatId,
+                filename: media.filename,
+                mimetype: media.mimetype,
+                reason: err instanceof Error ? err.message : String(err),
+            });
+            await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
+        }
+    }
+
+    /**
+     * Wrap an attachment for the library, with a mimetype we can trust. A caller that sends
+     * `application/octet-stream` for a JPEG would otherwise get a document card instead of a
+     * photo; the file extension usually knows better, so it gets the final say over a
+     * generic type.
+     */
     private toMessageMedia(file: MediaAttachment): MessageMedia {
         if (file.path) {
-            return MessageMedia.fromFilePath(file.path);
+            const media = MessageMedia.fromFilePath(file.path);
+            media.mimetype = resolveMimetype(file.mimetype ?? media.mimetype, file.filename ?? media.filename);
+            if (file.filename) media.filename = file.filename;
+            return media;
         }
         if (file.buffer) {
             if (!file.mimetype || !file.filename) {
                 throw new BadAttachmentError('buffer attachments require mimetype and filename');
             }
-            return new MessageMedia(file.mimetype, file.buffer.toString('base64'), file.filename);
+            return new MessageMedia(
+                resolveMimetype(file.mimetype, file.filename),
+                file.buffer.toString('base64'),
+                file.filename,
+            );
         }
         if (file.base64) {
             if (!file.mimetype || !file.filename) {
                 throw new BadAttachmentError('base64 attachments require mimetype and filename');
             }
-            return new MessageMedia(file.mimetype, file.base64, file.filename);
+            return new MessageMedia(resolveMimetype(file.mimetype, file.filename), file.base64, file.filename);
         }
         throw new BadAttachmentError('attachment must provide one of path, buffer, or base64');
     }

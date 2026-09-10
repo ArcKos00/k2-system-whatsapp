@@ -9,7 +9,9 @@ export interface MediaFileDto {
   base64: string;
 
   /**
-   * MIME type of the file.
+   * MIME type of the file. Decides whether the file shows up inline (`image/jpeg`,
+   * `image/png`, `video/mp4`, `audio/mpeg`, …) or as a document. A generic
+   * `application/octet-stream` is replaced by the type the `filename` extension implies.
    * @example "image/png"
    */
   mimetype: string;
@@ -40,7 +42,9 @@ export interface SendMessageDto {
   message?: string;
 
   /**
-   * Optional attachments, base64-encoded.
+   * Optional attachments, base64-encoded. Photos, videos and audio are delivered as inline
+   * media (a picture or player in the chat) whenever WhatsApp accepts them that way, and fall
+   * back to a document otherwise; every other file type is delivered as a document.
    */
   files?: MediaFileDto[];
 

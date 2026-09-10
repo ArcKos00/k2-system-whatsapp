@@ -191,6 +191,12 @@ account cannot see returns `404 WA_CHAT_NOT_FOUND`.
 
 ## Notes on reliability / anti-ban
 
+- Photos, videos and audio (`image/jpeg`, `image/png`, `image/webp`, `video/mp4`,
+  `video/3gpp`, `audio/*`) are sent as inline media so they render as a picture or a
+  player. If WhatsApp rejects the inline upload — an oversized image, an unsupported
+  codec — the same file is re-sent as a document. Everything else (PDF, Office, GIF,
+  archives…) is sent as a document from the start. A generic `application/octet-stream`
+  mimetype is replaced by the type implied by the file extension.
 - `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
   for bulk sending. WhatsApp may ban numbers that automate aggressively.
 - The number is validated with `getNumberId` before sending; unknown numbers

@@ -21,7 +21,9 @@ export interface SendToChatDto {
   message?: string;
 
   /**
-   * Optional attachments, base64-encoded.
+   * Optional attachments, base64-encoded. Photos, videos and audio are delivered as inline
+   * media (a picture or player in the chat) whenever WhatsApp accepts them that way, and fall
+   * back to a document otherwise; every other file type is delivered as a document.
    */
   files?: MediaFileDto[];
 
