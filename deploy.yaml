@@ -33,6 +33,12 @@ data:
   WHATSAPP_MESSAGE_DELAY_MS: "3000"
   PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+  # Node heap, kept well under the container memory limit so V8 GCs instead of the
+  # kernel OOM-killing the pod. Set here (envFrom wins over the image's ENV) so the
+  # heap can follow a limits change without rebuilding the image — keep the two in
+  # step: roughly half of resources.limits.memory, leaving the rest for the
+  # Chromium renderer's native memory, which lives outside this heap.
+  NODE_OPTIONS: "--max-old-space-size=2048"
   WHATSAPP_READY_TIMEOUT_MS: "180000"
   WHATSAPP_RECONCILE_MAX_FAILURES: "3"
   WHATSAPP_RECONCILE_BACKOFF_MAX_MS: "900000"
@@ -58,8 +64,14 @@ spec:
   accessModes:
     - ReadWriteOnce
   resources:
+    # Shared by every instance (one subPath folder each): a LocalAuth session plus
+    # the idempotency store runs a few hundred MB per instance, and Chromium's
+    # profile cache grows on each WA Web reload — 1Gi filled up.
+    # NOTE: growing this on an existing PVC only takes effect if the StorageClass
+    # has allowVolumeExpansion: true; otherwise recreate the claim (which drops the
+    # sessions and forces a fresh QR login).
     requests:
-      storage: 1Gi
+      storage: 10Gi
   # storageClassName: "{{storage-class}}"   # uncomment / set if no default SC
 ---
 apiVersion: apps/v1
@@ -117,6 +129,14 @@ spec:
               add:
                 - CHOWN
                 - DAC_OVERRIDE
+          # Tiny, but set: without them the pod is BestEffort while this container runs.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
           volumeMounts:
             # The volume ROOT, deliberately without subPath — the folder is made from outside.
             - name: data
@@ -151,6 +171,13 @@ spec:
             - name: data
               mountPath: /app/data
               subPath: ${SERVICE_NAME}
+            # Chromium's default /dev/shm in a container is 64Mi; the renderer runs out
+            # of it and dies mid-session ("Target closed"). This replaces it with a 1Gi
+            # tmpfs — but note whatsappService.ts currently passes
+            # --disable-dev-shm-usage, which sends that traffic to /tmp instead, so the
+            # mount only starts paying off once that flag is dropped.
+            - name: dshm
+              mountPath: /dev/shm
           # Give the WhatsApp client time to connect / wait for QR login before
           # liveness starts killing the pod.
           startupProbe:
@@ -179,19 +206,26 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "250m"
-              memory: "1Gi"
+              cpu: "500m"
+              memory: "2Gi"
             limits:
               # headless Chrome is memory-hungry and grows as WA Web reloads;
-              # 1Gi was too tight and caused OOMKilled (137). Node heap is capped
-              # at 1024Mi (NODE_OPTIONS) below this so V8 GCs instead of OOMing,
-              # leaving headroom for the Chromium renderer's native memory.
-              cpu: "1000m"
-              memory: "2Gi"
+              # 1Gi, then 2Gi, were too tight and caused OOMKilled (137). Node heap is
+              # capped at 2048Mi (NODE_OPTIONS in the ConfigMap) below this so V8 GCs
+              # instead of OOMing, leaving headroom for the Chromium renderer's native
+              # memory and for the memory-backed /dev/shm, which also counts here.
+              cpu: "2000m"
+              memory: "4Gi"
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: whatsapp-data
+        - name: dshm
+          emptyDir:
+            # tmpfs — pages actually used count against the container memory limit
+            # above, so sizeLimit is a ceiling, not a reservation.
+            medium: Memory
+            sizeLimit: 1Gi
 ---
 apiVersion: v1
 kind: Service
