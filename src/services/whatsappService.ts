@@ -84,9 +84,14 @@ export interface MediaPrepReport {
     mediaObjectResolved?: boolean;
     mediaObjectError?: string;
     probeError?: string;
+    /** The image the probe prepped: its edge in pixels (0 for the built-in 8x8) and its size. */
+    probePixels?: number;
+    probeBytes?: number;
     /** Only when a chat id was given: whether the send path's very first call still works. */
     chatResolved?: boolean;
     chatError?: string;
+    /** What the prep had produced the last time it came back without a filehash. */
+    lastPrepFailure?: Record<string, unknown>;
 }
 
 /** Chat id servers the gateway will send to, and how the odd spellings map onto them. */
@@ -136,7 +141,6 @@ const PUPPETEER_ARGS = [
     '--disable-dev-shm-usage',
     '--disable-gpu',
     '--no-zygote',
-    '--js-flags=--max-old-space-size=256',
     '--disable-extensions',
     '--disable-background-networking',
     '--disable-background-timer-throttling',
@@ -144,6 +148,19 @@ const PUPPETEER_ARGS = [
     '--disable-renderer-backgrounding',
     '--mute-audio',
 ];
+
+/**
+ * The browser flags, with the renderer's heap ceiling only when one is configured.
+ *
+ * That ceiling is not just about idling memory: the renderer is where WhatsApp Web decodes and
+ * re-encodes an outgoing photo, and a heap too small for that makes the prep give up quietly —
+ * it resolves without a filehash instead of throwing, and the send dies further down inside
+ * WhatsApp's own bundle. `WHATSAPP_RENDERER_HEAP_MB=0` removes the ceiling.
+ */
+const puppeteerArgs = (): string[] => {
+    const heapMb = config.whatsapp.rendererHeapMb;
+    return heapMb > 0 ? [...PUPPETEER_ARGS, `--js-flags=--max-old-space-size=${heapMb}`] : PUPPETEER_ARGS;
+};
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -609,7 +626,7 @@ export class WhatsappService {
     }
 
     private buildClientOptions(): ClientOptions {
-        const puppeteer: LaunchOptions = {headless: true, args: PUPPETEER_ARGS};
+        const puppeteer: LaunchOptions = {headless: true, args: puppeteerArgs()};
 
         if (config.whatsapp.puppeteerExecutablePath) {
             puppeteer.executablePath = config.whatsapp.puppeteerExecutablePath;
@@ -803,142 +820,196 @@ export class WhatsappService {
      * one log line per session says whether prep is healthy, whether our hash rescued it, or —
      * when neither holds — what shape the prep now returns.
      */
-    public async inspectMediaPrep(chatId?: string): Promise<MediaPrepReport> {
+    public async inspectMediaPrep(chatId?: string, pixels?: number): Promise<MediaPrepReport> {
         const page = this.client.pupPage;
         if (!page) {
             return {shimInstalled: false, detail: 'the browser page is not open'};
         }
 
         try {
-            const report = await page.evaluate(async (probeJpegBase64: string, probeChatId: string) => {
-                type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-                const scope = globalThis as unknown as Loose;
-                const report: Loose = {shimInstalled: false};
+            const report = await page.evaluate(
+                async (probeJpegBase64: string, probeChatId: string, probePixels: number) => {
+                    type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+                    const scope = globalThis as unknown as Loose;
+                    const report: Loose = {shimInstalled: false};
 
-                const load = (name: string): Loose | undefined => {
-                    try {
-                        return scope.require(name);
-                    } catch {
-                        return undefined;
-                    }
-                };
-
-                const sha256Base64 = async (bytes: ArrayBuffer): Promise<string> => {
-                    const digest = await scope.crypto.subtle.digest('SHA-256', bytes);
-                    return scope.btoa(String.fromCharCode(...new Uint8Array(digest)));
-                };
-
-                // The prepared blob is what gets uploaded, so it — not the file we handed in —
-                // is what the hash has to describe. Which of these shapes holds the bytes
-                // depends on the build, so every one is tried.
-                const bytesOf = async (candidate: Loose | undefined): Promise<ArrayBuffer | undefined> => {
-                    if (!candidate) return undefined;
-                    const attempts = [
-                        async () => candidate.arrayBuffer?.(),
-                        async () => (await candidate.forceToBlob?.())?.arrayBuffer?.(),
-                        async () => candidate._blob?.arrayBuffer?.(),
-                    ];
-                    for (const attempt of attempts) {
+                    const load = (name: string): Loose | undefined => {
                         try {
-                            const buffer = await attempt();
-                            if (buffer?.byteLength > 0) return buffer;
+                            return scope.require(name);
                         } catch {
-                            // Next shape.
+                            return undefined;
+                        }
+                    };
+
+                    const sha256Base64 = async (bytes: ArrayBuffer): Promise<string> => {
+                        const digest = await scope.crypto.subtle.digest('SHA-256', bytes);
+                        return scope.btoa(String.fromCharCode(...new Uint8Array(digest)));
+                    };
+
+                    // The prepared blob is what gets uploaded, so it — not the file we handed in —
+                    // is what the hash has to describe. Which of these shapes holds the bytes
+                    // depends on the build, so every one is tried.
+                    const bytesOf = async (candidate: Loose | undefined): Promise<ArrayBuffer | undefined> => {
+                        if (!candidate) return undefined;
+                        const attempts = [
+                            async () => candidate.arrayBuffer?.(),
+                            async () => (await candidate.forceToBlob?.())?.arrayBuffer?.(),
+                            async () => candidate._blob?.arrayBuffer?.(),
+                        ];
+                        for (const attempt of attempts) {
+                            try {
+                                const buffer = await attempt();
+                                if (buffer?.byteLength > 0) return buffer;
+                            } catch {
+                                // Next shape.
+                            }
+                        }
+                        return undefined;
+                    };
+
+                    const wwebjs = scope.WWebJS as Loose | undefined;
+                    if (scope.__k2MediaPrepShim) {
+                        report.shimInstalled = true;
+                        report.detail = 'already installed';
+                    } else if (typeof wwebjs?.injectToFunction !== 'function') {
+                        report.detail = 'WWebJS.injectToFunction is unavailable';
+                    } else {
+                        wwebjs.injectToFunction(
+                            {module: 'WAWebPrepRawMedia', function: 'prepRawMedia'},
+                            (module: Loose, original: Loose, ...args: unknown[]) => {
+                                const prep = (original as (...a: unknown[]) => Loose).apply(module, args);
+                                const waitForPrep = prep?.waitForPrep;
+                                if (typeof waitForPrep !== 'function') return prep;
+
+                                prep.waitForPrep = async (...waitArgs: unknown[]) => {
+                                    const mediaData = await waitForPrep.apply(prep, waitArgs);
+                                    if (!mediaData || mediaData.filehash) return mediaData;
+
+                                    // The input is only worth hashing when the prep was not asked to
+                                    // transcode: for a photo or a video the bytes that go up are the
+                                    // prepared ones, and a hash of anything else would travel with the
+                                    // message and not match what the recipient downloads.
+                                    const untouched = Boolean((args[1] as Loose | undefined)?.asDocument);
+                                    const bytes =
+                                        (await bytesOf(mediaData.mediaBlob)) ??
+                                        (untouched ? await bytesOf(args[0] as Loose) : undefined);
+                                    if (bytes) {
+                                        mediaData.filehash = await sha256Base64(bytes);
+                                        scope.__k2MediaPrepShimHits = (scope.__k2MediaPrepShimHits ?? 0) + 1;
+                                    }
+
+                                    // How far the prep actually got. A stage short of the end, or a
+                                    // missing blob, says it gave up on the image rather than on the
+                                    // hash — which is what tells a starved renderer apart from a
+                                    // build that simply stopped returning the field.
+                                    scope.__k2LastPrepFailure = {
+                                        at: new Date().toISOString(),
+                                        asDocument: untouched,
+                                        filledByShim: Boolean(bytes),
+                                        mediaStage: mediaData.mediaStage,
+                                        type: mediaData.type,
+                                        mimetype: mediaData.mimetype,
+                                        fullWidth: mediaData.fullWidth,
+                                        fullHeight: mediaData.fullHeight,
+                                        blobKind: mediaData.mediaBlob?.constructor?.name,
+                                        blobSize: mediaData.mediaBlob?.size,
+                                        hasPreview: Boolean(mediaData.preview),
+                                        keys: Object.keys(mediaData).slice(0, 40),
+                                    };
+                                    return mediaData;
+                                };
+                                return prep;
+                            },
+                        );
+                        scope.__k2MediaPrepShim = true;
+                        report.shimInstalled = true;
+                    }
+
+                    try {
+                        const OpaqueData = load('WAWebMediaOpaqueData');
+                        const prepModule = load('WAWebPrepRawMedia');
+                        if (!OpaqueData || typeof prepModule?.prepRawMedia !== 'function') {
+                            report.probeError = 'the media prep modules are not loaded in this build';
+                            return report;
+                        }
+
+                        // The built-in 8x8 proves the plumbing; a generated full-size photo is what
+                        // exercises the decode-and-re-encode step a real send goes through, and it is
+                        // the only way to reproduce a size-dependent failure without sending anything.
+                        let file: Loose;
+                        if (probePixels > 0) {
+                            const canvas = scope.document.createElement('canvas');
+                            canvas.width = probePixels;
+                            canvas.height = probePixels;
+                            const context = canvas.getContext('2d');
+                            // Noise, not a flat fill: a uniform image compresses to almost nothing and
+                            // would not weigh anything like the photo it stands in for.
+                            for (let y = 0; y < probePixels; y += 8) {
+                                for (let x = 0; x < probePixels; x += 8) {
+                                    context.fillStyle = `rgb(${(x * 7) % 256},${(y * 13) % 256},${(x + y) % 256})`;
+                                    context.fillRect(x, y, 8, 8);
+                                }
+                            }
+                            const blob = await new Promise((resolve) =>
+                                canvas.toBlob(resolve, 'image/jpeg', 0.85),
+                            );
+                            if (!blob) {
+                                report.probeError = `the renderer could not encode a ${probePixels}px JPEG`;
+                                return report;
+                            }
+                            file = new scope.File([blob], `probe-${probePixels}.jpeg`, {type: 'image/jpeg'});
+                        } else {
+                            const binary = scope.atob(probeJpegBase64);
+                            const bytes = new Uint8Array(binary.length);
+                            for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+                            file = new scope.File([bytes], 'probe.jpeg', {type: 'image/jpeg'});
+                        }
+                        report.probePixels = probePixels;
+                        report.probeBytes = file.size;
+
+                        const hitsBefore = scope.__k2MediaPrepShimHits ?? 0;
+                        const opaque = await OpaqueData.createFromData(file, 'image/jpeg');
+                        const mediaData = await prepModule.prepRawMedia(opaque, {}).waitForPrep();
+
+                        report.hasFilehash = Boolean(mediaData?.filehash);
+                        report.filledByShim = (scope.__k2MediaPrepShimHits ?? 0) > hitsBefore;
+                        report.resultKeys = mediaData ? Object.keys(mediaData).slice(0, 40) : [];
+                        report.blobKind = mediaData?.mediaBlob?.constructor?.name;
+
+                        // The step the send actually dies on: the hash goes into a memoized page
+                        // store, and it is that store — not the prep — that throws about an id
+                        // property. Running it here says which of the two is the broken one.
+                        try {
+                            const storage = load('WAWebMediaStorage');
+                            const mediaObject = storage?.getOrCreateMediaObject(mediaData?.filehash);
+                            report.mediaObjectResolved = Boolean(mediaObject);
+                        } catch (err) {
+                            report.mediaObjectResolved = false;
+                            report.mediaObjectError = err instanceof Error ? err.message : String(err);
+                        }
+                    } catch (err) {
+                        report.probeError = err instanceof Error ? err.message : String(err);
+                    }
+
+                    // Every send, with a file or without, resolves the chat first. If this is what
+                    // throws, the media path was never the problem.
+                    if (probeChatId) {
+                        try {
+                            const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
+                            report.chatResolved = Boolean(chat);
+                        } catch (err) {
+                            report.chatResolved = false;
+                            report.chatError = err instanceof Error ? err.message : String(err);
                         }
                     }
-                    return undefined;
-                };
 
-                const wwebjs = scope.WWebJS as Loose | undefined;
-                if (scope.__k2MediaPrepShim) {
-                    report.shimInstalled = true;
-                    report.detail = 'already installed';
-                } else if (typeof wwebjs?.injectToFunction !== 'function') {
-                    report.detail = 'WWebJS.injectToFunction is unavailable';
-                } else {
-                    wwebjs.injectToFunction(
-                        {module: 'WAWebPrepRawMedia', function: 'prepRawMedia'},
-                        (module: Loose, original: Loose, ...args: unknown[]) => {
-                            const prep = (original as (...a: unknown[]) => Loose).apply(module, args);
-                            const waitForPrep = prep?.waitForPrep;
-                            if (typeof waitForPrep !== 'function') return prep;
-
-                            prep.waitForPrep = async (...waitArgs: unknown[]) => {
-                                const mediaData = await waitForPrep.apply(prep, waitArgs);
-                                if (!mediaData || mediaData.filehash) return mediaData;
-
-                                // The input is only worth hashing when the prep was not asked to
-                                // transcode: for a photo or a video the bytes that go up are the
-                                // prepared ones, and a hash of anything else would travel with the
-                                // message and not match what the recipient downloads.
-                                const untouched = Boolean((args[1] as Loose | undefined)?.asDocument);
-                                const bytes =
-                                    (await bytesOf(mediaData.mediaBlob)) ??
-                                    (untouched ? await bytesOf(args[0] as Loose) : undefined);
-                                if (bytes) {
-                                    mediaData.filehash = await sha256Base64(bytes);
-                                    scope.__k2MediaPrepShimHits = (scope.__k2MediaPrepShimHits ?? 0) + 1;
-                                }
-                                return mediaData;
-                            };
-                            return prep;
-                        },
-                    );
-                    scope.__k2MediaPrepShim = true;
-                    report.shimInstalled = true;
-                }
-
-                try {
-                    const OpaqueData = load('WAWebMediaOpaqueData');
-                    const prepModule = load('WAWebPrepRawMedia');
-                    if (!OpaqueData || typeof prepModule?.prepRawMedia !== 'function') {
-                        report.probeError = 'the media prep modules are not loaded in this build';
-                        return report;
-                    }
-
-                    const binary = scope.atob(probeJpegBase64);
-                    const bytes = new Uint8Array(binary.length);
-                    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-                    const file = new scope.File([bytes], 'probe.jpeg', {type: 'image/jpeg'});
-
-                    const hitsBefore = scope.__k2MediaPrepShimHits ?? 0;
-                    const opaque = await OpaqueData.createFromData(file, 'image/jpeg');
-                    const mediaData = await prepModule.prepRawMedia(opaque, {}).waitForPrep();
-
-                    report.hasFilehash = Boolean(mediaData?.filehash);
-                    report.filledByShim = (scope.__k2MediaPrepShimHits ?? 0) > hitsBefore;
-                    report.resultKeys = mediaData ? Object.keys(mediaData).slice(0, 40) : [];
-                    report.blobKind = mediaData?.mediaBlob?.constructor?.name;
-
-                    // The step the send actually dies on: the hash goes into a memoized page
-                    // store, and it is that store — not the prep — that throws about an id
-                    // property. Running it here says which of the two is the broken one.
-                    try {
-                        const storage = load('WAWebMediaStorage');
-                        const mediaObject = storage?.getOrCreateMediaObject(mediaData?.filehash);
-                        report.mediaObjectResolved = Boolean(mediaObject);
-                    } catch (err) {
-                        report.mediaObjectResolved = false;
-                        report.mediaObjectError = err instanceof Error ? err.message : String(err);
-                    }
-                } catch (err) {
-                    report.probeError = err instanceof Error ? err.message : String(err);
-                }
-
-                // Every send, with a file or without, resolves the chat first. If this is what
-                // throws, the media path was never the problem.
-                if (probeChatId) {
-                    try {
-                        const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
-                        report.chatResolved = Boolean(chat);
-                    } catch (err) {
-                        report.chatResolved = false;
-                        report.chatError = err instanceof Error ? err.message : String(err);
-                    }
-                }
-
-                return report;
-            }, PROBE_JPEG_BASE64, chatId ?? '');
+                    report.lastPrepFailure = scope.__k2LastPrepFailure;
+                    return report;
+                },
+                PROBE_JPEG_BASE64,
+                chatId ?? '',
+                pixels ?? 0,
+            );
 
             const details = report as MediaPrepReport;
             if (details.hasFilehash && details.mediaObjectResolved && !details.filledByShim) {
@@ -1578,7 +1649,36 @@ export class WhatsappService {
         try {
             await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
         } catch (err) {
+            await this.logPrepSnapshot(media);
             throw this.asMediaFailure(err, media);
+        }
+    }
+
+    /**
+     * How far WhatsApp's prep had got on the file that just failed.
+     *
+     * The error the send throws comes from a minified bundle and names nothing, while the prep
+     * leaves behind the half-finished model it gave up on. That model is the difference between
+     * "this build stopped returning the field" and "the renderer ran out of room on a full-size
+     * photo", so it is worth one page call on a failure.
+     */
+    private async logPrepSnapshot(media: MessageMedia): Promise<void> {
+        const page = this.client.pupPage;
+        if (!page) return;
+        try {
+            const snapshot = await page.evaluate(
+                () => (globalThis as unknown as Record<string, unknown>).__k2LastPrepFailure,
+            );
+            if (snapshot) {
+                logger.error('WhatsApp media prep gave up on this file', {
+                    filename: media.filename,
+                    mimetype: media.mimetype,
+                    size: media.filesize,
+                    snapshot,
+                });
+            }
+        } catch (err) {
+            logger.warn('Could not read the media prep snapshot', err);
         }
     }
 

@@ -74,6 +74,15 @@ export const config = {
     webVersion: process.env.WHATSAPP_WEB_VERSION || undefined,
     webVersionRemotePath: process.env.WHATSAPP_WEB_VERSION_REMOTE_PATH || undefined,
     qrImagePath: process.env.WHATSAPP_QR_PATH || undefined,
+    /**
+     * Ceiling on the Chromium renderer's JavaScript heap, in MB.
+     *
+     * It was set low to keep the pod off the kernel's OOM killer, but the renderer is also
+     * where WhatsApp Web decodes and re-encodes a photo before uploading it, and a full-size
+     * image needs far more room than a chat does. Zero leaves the flag off entirely and lets
+     * the renderer use what the container allows.
+     */
+    rendererHeapMb: num('WHATSAPP_RENDERER_HEAP_MB', 256),
     puppeteerExecutablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     puppeteerChannel: process.env.PUPPETEER_BROWSER_CHANNEL || undefined,
   },

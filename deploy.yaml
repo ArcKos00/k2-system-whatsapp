@@ -39,6 +39,12 @@ data:
   # step: roughly half of resources.limits.memory, leaving the rest for the
   # Chromium renderer's native memory, which lives outside this heap.
   NODE_OPTIONS: "--max-old-space-size=2048"
+  # Ceiling on the Chromium RENDERER's JS heap (the Node heap is NODE_OPTIONS above). The
+  # renderer is also where WhatsApp Web decodes and re-encodes an outgoing photo, and a heap
+  # too small for that makes the prep give up quietly: it returns no filehash and the send dies
+  # inside WhatsApp's own bundle. Check with GET /health/media-prep?pixels=2048 before raising
+  # it, and keep it well under resources.limits.memory. 0 leaves the renderer uncapped.
+  WHATSAPP_RENDERER_HEAP_MB: "256"
   WHATSAPP_READY_TIMEOUT_MS: "180000"
   WHATSAPP_RECONCILE_MAX_FAILURES: "3"
   WHATSAPP_RECONCILE_BACKOFF_MAX_MS: "900000"

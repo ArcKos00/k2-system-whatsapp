@@ -215,7 +215,14 @@ account cannot see returns `404 WA_CHAT_NOT_FOUND`.
   media must not be dropped in the meantime.
 - `GET /health/media-prep` runs that same check on demand and answers with what it found;
   `?chatId=<id>` also resolves that chat, which is the one call every send makes before the
-  media path is even reached. It sends nothing and needs no token.
+  media path is even reached, and `?pixels=2048` preps a generated full-size photo instead of
+  the 8x8 one — the prep can be perfectly healthy on a thumbnail and give up on a real photo.
+  It sends nothing and needs no token.
+- `WHATSAPP_RENDERER_HEAP_MB` caps the Chromium renderer's JavaScript heap (256 by default, 0
+  to leave it uncapped). The renderer is where an outgoing photo is decoded and re-encoded, so a
+  ceiling that keeps idle memory down can also be what makes the prep give up on a full-size
+  image — if `?pixels=2048` fails and `?pixels=64` does not, raise this before suspecting the
+  build.
 - `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
   for bulk sending. WhatsApp may ban numbers that automate aggressively.
 - The number is validated with `getNumberId` before sending; unknown numbers

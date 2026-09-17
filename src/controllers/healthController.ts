@@ -33,11 +33,13 @@ export class HealthController extends Controller {
    * returning one takes every media send down with a minified page error that names nothing.
    * This preps an 8x8 JPEG and reports what came back, whether the hash could then be looked
    * up, and — with `chatId` — whether the send path's first call, resolving the chat, still
-   * works. Read it when sends fail and the message blames the prep.
+   * works. `pixels` preps a generated image of that edge length instead, which is what
+   * reproduces a failure only full-size photos hit. It also returns what the prep had produced
+   * the last time a real send found no hash.
    */
   @Get('media-prep')
-  public async mediaPrep(@Query() chatId?: string): Promise<MediaPrepReport> {
-    return this.whatsapp.inspectMediaPrep(chatId);
+  public async mediaPrep(@Query() chatId?: string, @Query() pixels?: number): Promise<MediaPrepReport> {
+    return this.whatsapp.inspectMediaPrep(chatId, pixels);
   }
 }
 
