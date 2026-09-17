@@ -1999,8 +1999,17 @@ export class WhatsappService {
                 // the chat holds well-formed keys — and what the class offers is on its prototype,
                 // where a renamed or dropped member shows up plainly instead of as `undefined`.
                 try {
-                    const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
-                    const messages = chat?.msgs?.getModelsArray?.() ?? [];
+                    let messages: Loose[] = [];
+                    if (probeChatId) {
+                        const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
+                        messages = chat?.msgs?.getModelsArray?.() ?? [];
+                    }
+                    // A chat model can be loaded with none of its messages in memory. The global
+                    // collection holds whatever the session has seen, and any key WhatsApp built
+                    // answers the question just as well.
+                    if (messages.length === 0) {
+                        messages = load('WAWebCollections')?.Msg?.getModelsArray?.() ?? [];
+                    }
                     const real = messages[messages.length - 1]?.id;
                     out.realKey = real
                         ? {
