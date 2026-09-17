@@ -66,12 +66,18 @@ spec:
   resources:
     # Shared by every instance (one subPath folder each): a LocalAuth session plus
     # the idempotency store runs a few hundred MB per instance, and Chromium's
-    # profile cache grows on each WA Web reload — 1Gi filled up.
-    # NOTE: growing this on an existing PVC only takes effect if the StorageClass
-    # has allowVolumeExpansion: true; otherwise recreate the claim (which drops the
-    # sessions and forces a fresh QR login).
+    # profile cache grows on each WA Web reload.
+    # NOTE: keep this in step with the PVC that is already bound in the cluster.
+    # Raising it on an existing claim is rejected by the API server ("only
+    # dynamically provisioned pvc can be resized") unless the StorageClass sets
+    # allowVolumeExpansion — k3s's default local-path does not, and has no resizer
+    # at all, so the deploy fails on this one object while everything else applies.
+    # On local-path the number is nominal anyway: the volume is a plain directory
+    # on the node under no quota, so the sessions may (and do) outgrow it. To make
+    # it truthful, recreate the claim out of band — which drops the sessions and
+    # forces a fresh QR login unless the directory is carried over by hand.
     requests:
-      storage: 10Gi
+      storage: 1Gi
   # storageClassName: "{{storage-class}}"   # uncomment / set if no default SC
 ---
 apiVersion: apps/v1
