@@ -1674,11 +1674,27 @@ export class WhatsappService {
                     filename: media.filename,
                     mimetype: media.mimetype,
                     size: media.filesize,
+                    // Both ends of the file, because they answer different questions: the head
+                    // says what format these bytes really are, and a JPEG that does not end in
+                    // ffd9 was cut off before it was fully written.
+                    head: this.hexEdge(media.data, 'head'),
+                    tail: this.hexEdge(media.data, 'tail'),
                     snapshot,
                 });
             }
         } catch (err) {
             logger.warn('Could not read the media prep snapshot', err);
+        }
+    }
+
+    /** The first or last 16 bytes of base64 data, in hex. */
+    private hexEdge(data: string, end: 'head' | 'tail'): string {
+        // Base64 decodes in 4-character groups, so both slices have to sit on that grid.
+        const slice = end === 'head' ? data.slice(0, 24) : data.slice(Math.max(0, data.length - 24));
+        try {
+            return Buffer.from(slice, 'base64').toString('hex');
+        } catch {
+            return '<unreadable>';
         }
     }
 
