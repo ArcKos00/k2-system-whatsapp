@@ -64,6 +64,24 @@ interface ChatDescriptor {
     unreadCount?: number;
 }
 
+/**
+ * What the page says about WhatsApp's own media prep, logged once per ready session.
+ *
+ * `hasFilehash` is the whole question: everything downstream of the prep is keyed by that hash,
+ * and a build that stops returning one takes every media send down with an error from inside
+ * WhatsApp's bundle. `filledByShim` says the hash was ours, `resultKeys` describes what the
+ * prep handed back when it was not, which is what a fix would have to be written against.
+ */
+interface MediaPrepReport {
+    shimInstalled: boolean;
+    detail?: string;
+    hasFilehash?: boolean;
+    filledByShim?: boolean;
+    resultKeys?: string[];
+    blobKind?: string;
+    probeError?: string;
+}
+
 /** Chat id servers the gateway will send to, and how the odd spellings map onto them. */
 const CHAT_SERVERS = new Set(['c.us', 'g.us', 'lid', 'newsletter', 'broadcast']);
 
@@ -90,6 +108,18 @@ const TRANSIENT_FRAME_ERROR =
  */
 const MEDIA_PREP_FAILURE =
     /must include an id property|media-fault|filehash undefined|upload failed: media entry was not created/i;
+
+/**
+ * An 8x8 baseline JPEG, used to ask the page whether media prep still works at all without
+ * sending anything to anyone.
+ */
+const PROBE_JPEG_BASE64 =
+    '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIs' +
+    'IxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAIAAgBAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcI' +
+    'CQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcY' +
+    'GRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKj' +
+    'pKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/APn+' +
+    'iiiv/9k=';
 
 const CHROMIUM_LOCK_FILES = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
 
@@ -632,6 +662,7 @@ export class WhatsappService {
             this.bulkChatReadFailed = false;
             logger.info('WhatsApp client is ready.');
             void this.logWebVersion();
+            void this.inspectMediaPrep();
             this.startHeartbeat();
             this.startReconcile();
             void this.reconcile();
@@ -744,6 +775,148 @@ export class WhatsappService {
             });
         } catch (err) {
             logger.warn('Could not read the WhatsApp Web version', err);
+        }
+    }
+
+    /**
+     * Repair WhatsApp's media prep if this build has stopped filling in the filehash, and say
+     * in the log whether it works.
+     *
+     * whatsapp-web.js prepares every attachment through WhatsApp's own `prepRawMedia`, then
+     * looks the result's `filehash` up in a memoized page store. On a build that no longer
+     * returns that hash the lookup gets `undefined` and every single media send dies inside
+     * WhatsApp's minified bundle ("Data passed to getter must include an id property"), whatever
+     * the file is — the library's version is the newest published one, so there is no upgrade to
+     * wait for. The hash is a plain SHA-256 of the bytes that are about to be uploaded, so when
+     * the prep omits it we compute it ourselves and the rest of the send proceeds untouched.
+     *
+     * The probe that follows sends nothing: it preps an 8x8 JPEG and reports what came back, so
+     * one log line per session says whether prep is healthy, whether our hash rescued it, or —
+     * when neither holds — what shape the prep now returns.
+     */
+    private async inspectMediaPrep(): Promise<void> {
+        const page = this.client.pupPage;
+        if (!page) {
+            return;
+        }
+
+        try {
+            const report = await page.evaluate(async (probeJpegBase64: string) => {
+                type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+                const scope = globalThis as unknown as Loose;
+                const report: Loose = {shimInstalled: false};
+
+                const load = (name: string): Loose | undefined => {
+                    try {
+                        return scope.require(name);
+                    } catch {
+                        return undefined;
+                    }
+                };
+
+                const sha256Base64 = async (bytes: ArrayBuffer): Promise<string> => {
+                    const digest = await scope.crypto.subtle.digest('SHA-256', bytes);
+                    return scope.btoa(String.fromCharCode(...new Uint8Array(digest)));
+                };
+
+                // The prepared blob is what gets uploaded, so it — not the file we handed in —
+                // is what the hash has to describe. Which of these shapes holds the bytes
+                // depends on the build, so every one is tried.
+                const bytesOf = async (candidate: Loose | undefined): Promise<ArrayBuffer | undefined> => {
+                    if (!candidate) return undefined;
+                    const attempts = [
+                        async () => candidate.arrayBuffer?.(),
+                        async () => (await candidate.forceToBlob?.())?.arrayBuffer?.(),
+                        async () => candidate._blob?.arrayBuffer?.(),
+                    ];
+                    for (const attempt of attempts) {
+                        try {
+                            const buffer = await attempt();
+                            if (buffer?.byteLength > 0) return buffer;
+                        } catch {
+                            // Next shape.
+                        }
+                    }
+                    return undefined;
+                };
+
+                const wwebjs = scope.WWebJS as Loose | undefined;
+                if (scope.__k2MediaPrepShim) {
+                    report.shimInstalled = true;
+                    report.detail = 'already installed';
+                } else if (typeof wwebjs?.injectToFunction !== 'function') {
+                    report.detail = 'WWebJS.injectToFunction is unavailable';
+                } else {
+                    wwebjs.injectToFunction(
+                        {module: 'WAWebPrepRawMedia', function: 'prepRawMedia'},
+                        (module: Loose, original: Loose, ...args: unknown[]) => {
+                            const prep = (original as (...a: unknown[]) => Loose).apply(module, args);
+                            const waitForPrep = prep?.waitForPrep;
+                            if (typeof waitForPrep !== 'function') return prep;
+
+                            prep.waitForPrep = async (...waitArgs: unknown[]) => {
+                                const mediaData = await waitForPrep.apply(prep, waitArgs);
+                                if (!mediaData || mediaData.filehash) return mediaData;
+
+                                // The input is only worth hashing when the prep was not asked to
+                                // transcode: for a photo or a video the bytes that go up are the
+                                // prepared ones, and a hash of anything else would travel with the
+                                // message and not match what the recipient downloads.
+                                const untouched = Boolean((args[1] as Loose | undefined)?.asDocument);
+                                const bytes =
+                                    (await bytesOf(mediaData.mediaBlob)) ??
+                                    (untouched ? await bytesOf(args[0] as Loose) : undefined);
+                                if (bytes) {
+                                    mediaData.filehash = await sha256Base64(bytes);
+                                    scope.__k2MediaPrepShimHits = (scope.__k2MediaPrepShimHits ?? 0) + 1;
+                                }
+                                return mediaData;
+                            };
+                            return prep;
+                        },
+                    );
+                    scope.__k2MediaPrepShim = true;
+                    report.shimInstalled = true;
+                }
+
+                try {
+                    const OpaqueData = load('WAWebMediaOpaqueData');
+                    const prepModule = load('WAWebPrepRawMedia');
+                    if (!OpaqueData || typeof prepModule?.prepRawMedia !== 'function') {
+                        report.probeError = 'the media prep modules are not loaded in this build';
+                        return report;
+                    }
+
+                    const binary = scope.atob(probeJpegBase64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+                    const file = new scope.File([bytes], 'probe.jpeg', {type: 'image/jpeg'});
+
+                    const hitsBefore = scope.__k2MediaPrepShimHits ?? 0;
+                    const opaque = await OpaqueData.createFromData(file, 'image/jpeg');
+                    const mediaData = await prepModule.prepRawMedia(opaque, {}).waitForPrep();
+
+                    report.hasFilehash = Boolean(mediaData?.filehash);
+                    report.filledByShim = (scope.__k2MediaPrepShimHits ?? 0) > hitsBefore;
+                    report.resultKeys = mediaData ? Object.keys(mediaData).slice(0, 40) : [];
+                    report.blobKind = mediaData?.mediaBlob?.constructor?.name;
+                } catch (err) {
+                    report.probeError = err instanceof Error ? err.message : String(err);
+                }
+
+                return report;
+            }, PROBE_JPEG_BASE64);
+
+            const details = report as MediaPrepReport;
+            if (details.hasFilehash && !details.filledByShim) {
+                logger.info('WhatsApp media prep is healthy', details);
+            } else if (details.hasFilehash) {
+                logger.warn('WhatsApp media prep no longer returns a filehash; ours is filling in', details);
+            } else {
+                logger.error('WhatsApp media prep is broken and could not be repaired', details);
+            }
+        } catch (err) {
+            logger.warn('Could not inspect WhatsApp media prep', err);
         }
     }
 
@@ -1372,21 +1545,25 @@ export class WhatsappService {
     }
 
     /**
-     * The document attempt is the last one, so its failure is where a bad file gets named.
+     * The document attempt is the last one, so its failure is where the send gets explained.
      *
-     * A file WhatsApp cannot prepare fails the same way on every retry, so reporting it as a
-     * gateway fault (502) only makes the caller's retry policy spend ten attempts on it. It is
-     * reported as a bad attachment (400) instead, with what we know about the file, and only
-     * genuine connection failures are left to travel on as they are.
+     * A prep failure is not the caller's fault: the empty and the mislabelled files are already
+     * turned away in `toMessageMedia`, so what reaches here is a file WhatsApp's own prep would
+     * not hash — which on a drifted build is every file. That makes it a gateway fault (502),
+     * not a bad attachment: a 4xx would have the uploader drop the media and move on, and the
+     * whole feed would go quiet while every send failed. The message names the prep and the
+     * session log line that says whether the build is the reason.
      */
     private asMediaFailure(err: unknown, media: MessageMedia): unknown {
         if (this.isTransientFrameError(err)) return err;
         const detail = err instanceof Error ? err.message : String(err);
         if (!MEDIA_PREP_FAILURE.test(detail)) return err;
-        return new BadAttachmentError(
-            `WhatsApp could not prepare '${media.filename ?? 'attachment'}' (${media.mimetype}, ` +
-            `${media.filesize ?? 'unknown'} bytes) — the file is truncated, or is not the format it claims ` +
-            `to be. Sending it again will fail the same way. Underlying failure: ${detail}`,
+        return new MessageSendError(
+            `WhatsApp Web's media prep returned nothing for '${media.filename ?? 'attachment'}' ` +
+            `(${media.mimetype}, ${media.filesize ?? 'unknown'} bytes), so the upload had no filehash to ` +
+            `key on. When every file fails this way the loaded WhatsApp Web build has moved past the ` +
+            `library — see the 'WhatsApp media prep' line this session logs on ready, and pin ` +
+            `WHATSAPP_WEB_VERSION to a build that still works. Underlying failure: ${detail}`,
         );
     }
 

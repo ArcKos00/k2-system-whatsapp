@@ -201,12 +201,18 @@ account cannot see returns `404 WA_CHAT_NOT_FOUND`.
   match its name — a video or an HTML error page saved as `.jpeg` — is sent under the type the
   content implies, because WhatsApp Web decodes photos and videos in the page before uploading
   and a mislabelled one breaks that prep instead of being refused.
-- A file WhatsApp cannot prepare at all (empty, truncated, or a format its in-page prep chokes
-  on) returns `400 BAD_ATTACHMENT`, not `502 WA_SEND_FAILED`. The distinction matters to the
-  caller's retry policy: the same bytes fail the same way on every attempt, so this one must
-  not be retried. In the page such a failure surfaces as WhatsApp's own minified
+- An empty attachment returns `400 BAD_ATTACHMENT` and is never sent; the caller's retry policy
+  should treat it as final, since the same upload cannot succeed.
+- Every attachment is prepared by WhatsApp Web itself before the upload, and everything after
+  that step is keyed by the `filehash` the prep returns. A build that stops returning one takes
+  *every* media send down with WhatsApp's own minified
   `Data passed to getter must include an id property (it's how we memoize) but got undefined`,
-  thrown when the library hands the missing filehash to an in-page getter.
+  because the library hands the missing hash to an in-page getter. The gateway fills the hash in
+  itself when the prep omits it, and logs one `WhatsApp media prep` line per ready session saying
+  whether the prep is healthy, whether our hash is carrying it, or what the prep returned
+  instead. A send that still fails is reported as `502 WA_SEND_FAILED` naming the prep — it is
+  the build, not the file, so the fix is pinning `WHATSAPP_WEB_VERSION` (see below), and the
+  media must not be dropped in the meantime.
 - `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
   for bulk sending. WhatsApp may ban numbers that automate aggressively.
 - The number is validated with `getNumberId` before sending; unknown numbers
