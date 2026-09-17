@@ -1015,6 +1015,7 @@ export class WhatsappService {
                                                         ...info,
                                                         ok: false,
                                                         error: String(err?.message ?? err),
+                                                        stack: String(err?.stack ?? '').slice(0, 900),
                                                     }),
                                             );
                                         });
@@ -1091,6 +1092,27 @@ export class WhatsappService {
                                 msgType: String(message?.type),
                             };
                         });
+
+                        // MsgKey in this build keeps its serialized form behind toString() and has
+                        // no _serialized at all — a key WhatsApp builds itself has none either. The
+                        // library reads that field in thirty-odd places, so every one of them gets
+                        // undefined: the id of a forwarded message, the lookup that closes a send.
+                        // Giving the class the property back, pointing at its own toString, fixes
+                        // all of them at once and changes nothing for WhatsApp's own code.
+                        if (!scope.__k2MsgKeySerialized) {
+                            const MsgKey = load('WAWebMsgKey') as Loose | undefined;
+                            const proto = (MsgKey as Loose)?.prototype;
+                            if (proto && !('_serialized' in proto) && typeof proto.toString === 'function') {
+                                Object.defineProperty(proto, '_serialized', {
+                                    get(this: Loose) {
+                                        return this.toString();
+                                    },
+                                    configurable: true,
+                                });
+                                scope.__k2MsgKeySerialized = true;
+                                record({step: 'MsgKey._serialized restored'});
+                            }
+                        }
 
                         // An entry for the install itself, so an empty trail and an old build
                         // cannot be mistaken for each other: no field at all means the page is
@@ -2010,7 +2032,10 @@ export class WhatsappService {
                     if (messages.length === 0) {
                         messages = load('WAWebCollections')?.Msg?.getModelsArray?.() ?? [];
                     }
-                    const real = messages[messages.length - 1]?.id;
+                    // Ours is an outgoing key, and the newest message is usually someone else's.
+                    // An outgoing one is the like-for-like comparison.
+                    const outgoing = messages.filter((message) => message?.id?.fromMe);
+                    const real = (outgoing[outgoing.length - 1] ?? messages[messages.length - 1])?.id;
                     out.realKey = real
                         ? {
                               ownKeys: Object.keys(real),
