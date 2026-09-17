@@ -2035,6 +2035,29 @@ export class WhatsappService {
                 } catch (err) {
                     out.msgKeyError = err instanceof Error ? err.message : String(err);
                 }
+
+                // A key WhatsApp built itself, for comparison. Incoming messages arrive fine, so
+                // the chat holds well-formed keys — and what the class offers is on its prototype,
+                // where a renamed or dropped member shows up plainly instead of as `undefined`.
+                try {
+                    const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
+                    const messages = chat?.msgs?.getModelsArray?.() ?? [];
+                    const real = messages[messages.length - 1]?.id;
+                    out.realKey = real
+                        ? {
+                              ownKeys: Object.keys(real),
+                              members: Object.getOwnPropertyNames(Object.getPrototypeOf(real)).slice(0, 40),
+                              serialized: String(real._serialized),
+                              stringified: String(real),
+                              from: widText(real.from),
+                              remote: widText(real.remote),
+                              participant: widText(real.participant),
+                              fromMe: real.fromMe,
+                          }
+                        : 'no messages loaded in this chat';
+                } catch (err) {
+                    out.realKeyError = err instanceof Error ? err.message : String(err);
+                }
                 return out;
             }, chatId);
         } catch (err) {

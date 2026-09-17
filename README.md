@@ -250,7 +250,13 @@ ready, check that `html/<version>.html` exists in wa-version, and set the variab
 it to go back to the library default if a pinned build stops loading, and expect to bump it when
 whatsapp-web.js is upgraded.
 
-It is pinned to `2.3000.1043840091-alpha` since 2026-09-17. The build WhatsApp was serving had
+Pinning was tried against this on 2026-09-17 and does not hold: the pinned index loads — the
+gateway downloads it, serves it from disk and logs both — and WhatsApp Web then updates itself
+past it, so `version in use` comes back as the current build anyway. The machinery stays because
+it costs nothing, and `version in use` is logged as an error when it disagrees with the pin, so a
+pin that silently does not take can never look like one that did.
+
+The drift it was meant to cure, for the record: The build WhatsApp was serving had
 slimmed `MsgKey` down to `{fromMe, remote, id, participant}` — the `from`, `to`, `selfDir` and
 `_serialized` the library fills in and reads back are gone — so every send built a key WhatsApp
 could not index and died on `Data passed to getter must include an id property`. Worth knowing
