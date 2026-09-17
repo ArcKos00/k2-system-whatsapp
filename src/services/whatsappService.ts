@@ -98,6 +98,9 @@ export interface MediaPrepReport {
     chatIsLid?: boolean;
     groupMetadataLoaded?: boolean;
     groupLidAddressing?: boolean;
+    /** What this build's MsgKey makes of the fields the library gives it. */
+    msgKey?: Record<string, unknown>;
+    msgKeyError?: string;
     /** What the prep had produced the last time it came back without a filehash. */
     lastPrepFailure?: Record<string, unknown>;
     /** The last few calls the send made after the prep, and which of them threw. */
@@ -1159,6 +1162,39 @@ export class WhatsappService {
                         report.mePnUser = widText(meUsers?.getMaybeMePnUser?.());
                     } catch (err) {
                         report.meUserError = err instanceof Error ? err.message : String(err);
+                    }
+
+                    // Build a message key exactly the way the library does, and look at what
+                    // comes out. The send fails with a key whose `from` is undefined although a
+                    // good one went in, so the question is whether this build's MsgKey still
+                    // takes the fields the library hands it.
+                    try {
+                        const MsgKey = load('WAWebMsgKey') as unknown as {
+                            new (fields: Loose): Loose;
+                            newId(): Promise<string>;
+                        };
+                        const widFactory = load('WAWebWidFactory');
+                        const from = meUsers?.getMaybeMeLidUser?.() ?? meUsers?.getMaybeMePnUser?.();
+                        const to = probeChatId ? widFactory?.createWid(probeChatId) : undefined;
+                        const key = new MsgKey({
+                            from,
+                            to,
+                            id: await MsgKey.newId(),
+                            participant: from,
+                            selfDir: 'out',
+                        });
+                        report.msgKey = {
+                            from: widText(key.from),
+                            to: widText(key.to),
+                            remote: widText(key.remote),
+                            participant: widText(key.participant),
+                            fromMe: key.fromMe,
+                            selfDir: String(key.selfDir),
+                            serialized: String(key._serialized),
+                            ownKeys: Object.keys(key).slice(0, 30),
+                        };
+                    } catch (err) {
+                        report.msgKeyError = err instanceof Error ? err.message : String(err);
                     }
 
                     if (probeChatId) {
