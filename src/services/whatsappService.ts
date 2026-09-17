@@ -91,6 +91,9 @@ export interface MediaPrepReport {
     meLidUser?: string;
     mePnUser?: string;
     meUserError?: string;
+    /** A key WhatsApp built itself, to hold the library's one against. */
+    realKey?: unknown;
+    realKeyError?: string;
     /** Only when a chat id was given: whether the send path's very first call still works. */
     chatResolved?: boolean;
     chatError?: string;
@@ -1223,52 +1226,6 @@ export class WhatsappService {
 
                     // Every send, with a file or without, resolves the chat first. If this is what
                     // throws, the media path was never the problem.
-                    // Who the account is, in both addressing schemes. A send picks one of these
-                    // as the message's `from`, and WhatsApp's move to LID means the other can
-                    // simply not exist any more — which no error here would ever say out loud.
-                    const meUsers = load('WAWebUserPrefsMeUser');
-                    const widText = (value: Loose): string =>
-                        String(value?._serialized ?? value?.user ?? value ?? 'undefined');
-                    try {
-                        report.meLidUser = widText(meUsers?.getMaybeMeLidUser?.());
-                        report.mePnUser = widText(meUsers?.getMaybeMePnUser?.());
-                    } catch (err) {
-                        report.meUserError = err instanceof Error ? err.message : String(err);
-                    }
-
-                    // Build a message key exactly the way the library does, and look at what
-                    // comes out. The send fails with a key whose `from` is undefined although a
-                    // good one went in, so the question is whether this build's MsgKey still
-                    // takes the fields the library hands it.
-                    try {
-                        const MsgKey = load('WAWebMsgKey') as unknown as {
-                            new (fields: Loose): Loose;
-                            newId(): Promise<string>;
-                        };
-                        const widFactory = load('WAWebWidFactory');
-                        const from = meUsers?.getMaybeMeLidUser?.() ?? meUsers?.getMaybeMePnUser?.();
-                        const to = probeChatId ? widFactory?.createWid(probeChatId) : undefined;
-                        const key = new MsgKey({
-                            from,
-                            to,
-                            id: await MsgKey.newId(),
-                            participant: from,
-                            selfDir: 'out',
-                        });
-                        report.msgKey = {
-                            from: widText(key.from),
-                            to: widText(key.to),
-                            remote: widText(key.remote),
-                            participant: widText(key.participant),
-                            fromMe: key.fromMe,
-                            selfDir: String(key.selfDir),
-                            serialized: String(key._serialized),
-                            ownKeys: Object.keys(key).slice(0, 30),
-                        };
-                    } catch (err) {
-                        report.msgKeyError = err instanceof Error ? err.message : String(err);
-                    }
-
                     if (probeChatId) {
                         try {
                             const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
@@ -1295,7 +1252,9 @@ export class WhatsappService {
                 pixels ?? 0,
             );
 
-            const details = report as MediaPrepReport;
+            // The same reading the failure log carries, so a question answered in one place is
+            // never missing from the other.
+            const details = Object.assign(report as MediaPrepReport, await this.readSendIdentities(chatId ?? ''));
             if (details.hasFilehash && details.mediaObjectResolved && !details.filledByShim) {
                 logger.info('WhatsApp media prep is healthy', details);
             } else if (details.hasFilehash && details.mediaObjectResolved) {
