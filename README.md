@@ -250,6 +250,16 @@ ready, check that `html/<version>.html` exists in wa-version, and set the variab
 it to go back to the library default if a pinned build stops loading, and expect to bump it when
 whatsapp-web.js is upgraded.
 
+It is pinned to `2.3000.1043840091-alpha` since 2026-09-17. The build WhatsApp was serving had
+slimmed `MsgKey` down to `{fromMe, remote, id, participant}` — the `from`, `to`, `selfDir` and
+`_serialized` the library fills in and reads back are gone — so every send built a key WhatsApp
+could not index and died on `Data passed to getter must include an id property`. Worth knowing
+for the next time: that error names nothing and surfaces wherever the undefined lands, and it
+took the media path down first, so it read for a day like a problem with the attachments. It was
+not. The file preps, hashes and uploads to WhatsApp's servers cleanly; the message built around
+it is what WhatsApp refuses. `GET /health/media-prep` exists to tell those two apart quickly,
+and a failing send now logs both account identities and a freshly built key beside the trace.
+
 ### Finding chat ids for the forward allowlist
 
 `RABBITMQ_CHAT_IDS` keys on WhatsApp chat ids, which are not something you can read off the
