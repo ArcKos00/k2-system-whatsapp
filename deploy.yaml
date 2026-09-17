@@ -66,6 +66,10 @@ data:
   # attachment problem for a day. This build is from 2026-07-25, two weeks after
   # whatsapp-web.js 1.34.7, and still has the old key. Bump it when the library is upgraded.
   WHATSAPP_WEB_VERSION: "2.3000.1043840091-alpha"
+  # The build's HTML is fetched once and kept here, on the session volume. If the cluster has no
+  # way out to raw.githubusercontent.com the gateway says so on startup, and the file can be put
+  # at <this path>/<version>.html by hand — the pin then holds with no egress at all.
+  WHATSAPP_WEB_VERSION_CACHE_PATH: "/app/data/web-versions"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

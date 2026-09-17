@@ -73,6 +73,13 @@ export const config = {
     initTimeoutMs: num('WHATSAPP_INIT_TIMEOUT_MS', 90000),
     webVersion: process.env.WHATSAPP_WEB_VERSION || undefined,
     webVersionRemotePath: process.env.WHATSAPP_WEB_VERSION_REMOTE_PATH || undefined,
+    /**
+     * Where a pinned build's HTML is kept once it has been fetched. It lives on the session
+     * volume so the pin survives a restart even if the archive is unreachable from the cluster,
+     * and so the file can be put there by hand when it always is.
+     */
+    webVersionCachePath: process.env.WHATSAPP_WEB_VERSION_CACHE_PATH || undefined,
+    webVersionFetchTimeoutMs: num('WHATSAPP_WEB_VERSION_FETCH_TIMEOUT_MS', 20000),
     qrImagePath: process.env.WHATSAPP_QR_PATH || undefined,
     /**
      * Ceiling on the Chromium renderer's JavaScript heap, in MB.

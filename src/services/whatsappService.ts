@@ -207,6 +207,7 @@ export class WhatsappService {
     private readonly client: Client;
     private readonly qrImagePath: string;
     private readonly cursorPath: string;
+    private readonly webVersionCachePath: string;
 
     private status: WhatsAppStatus = 'initializing';
     private currentQr: string | null = null;
@@ -235,6 +236,8 @@ export class WhatsappService {
             config.whatsapp.qrImagePath ?? join(config.whatsapp.sessionPath, 'qr.png');
         this.cursorPath =
             config.whatsapp.cursorPath ?? join(config.whatsapp.sessionPath, 'cursor.json');
+        this.webVersionCachePath =
+            config.whatsapp.webVersionCachePath ?? join(config.whatsapp.sessionPath, 'web-versions');
 
         this.client = new Client(this.buildClientOptions());
     }
@@ -256,6 +259,7 @@ export class WhatsappService {
         this.registerEventHandlers();
         await this.clearChromiumLocks();
         this.startHeartbeat();
+        await this.ensurePinnedBuild();
         this.armReadyWatchdog();
 
         const maxAttempts = Math.max(1, config.whatsapp.initMaxAttempts);
@@ -658,13 +662,16 @@ export class WhatsappService {
         const version = config.whatsapp.webVersion;
         if (version) {
             options.webVersion = version;
+            // Read from disk, never over the network. The library's own remote cache fetches the
+            // build from inside the pod and, when that fetch fails, returns null and lets the
+            // session load whatever WhatsApp serves — the pin then shows up in the log as applied
+            // while the page says otherwise. `ensurePinnedBuild` does the fetching, once, where a
+            // failure can be reported.
             options.webVersionCache = {
-                type: 'remote',
-                remotePath:
-                    config.whatsapp.webVersionRemotePath ??
-                    `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${version}.html`,
+                type: 'local',
+                path: this.webVersionCachePath,
             };
-            logger.info('Pinning WhatsApp Web version', {version});
+            logger.info('Pinning WhatsApp Web version', {version, from: this.webVersionCachePath});
         }
 
         return options;
@@ -802,16 +809,81 @@ export class WhatsappService {
     }
 
     /**
+     * Put the pinned build's HTML where the library will find it, and say so either way.
+     *
+     * A pin is only honoured if the file is there when the session starts: the library falls
+     * back to the live build without raising anything, so an unreachable archive looks exactly
+     * like a working pin until the "version in use" line says a different number. Fetching it
+     * here makes that failure loud, and keeping the file on the session volume means the pin
+     * holds through restarts even from a cluster with no way out to the archive — where the file
+     * can simply be dropped in by hand.
+     */
+    private async ensurePinnedBuild(): Promise<void> {
+        const version = config.whatsapp.webVersion;
+        if (!version) return;
+
+        const file = join(this.webVersionCachePath, `${version}.html`);
+        try {
+            const cached = await readFile(file, 'utf-8');
+            if (cached.length > 0) {
+                logger.info('Pinned WhatsApp Web build is already on disk', {
+                    version,
+                    file,
+                    bytes: cached.length,
+                });
+                return;
+            }
+        } catch {
+            // Not cached yet — fetch it below.
+        }
+
+        const url =
+            config.whatsapp.webVersionRemotePath ??
+            `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${version}.html`;
+        try {
+            const response = await fetch(url, {
+                signal: AbortSignal.timeout(config.whatsapp.webVersionFetchTimeoutMs),
+            });
+            if (!response.ok) {
+                throw new Error(`${url} returned ${response.status}`);
+            }
+            const html = await response.text();
+            // The archive answers 200 with a "404: Not Found" page for a version it does not
+            // have, and a few bytes of that would pin the session to nothing.
+            if (html.length < 10000) {
+                throw new Error(`${url} returned ${html.length} bytes, which is not a build`);
+            }
+            await mkdir(this.webVersionCachePath, {recursive: true});
+            await writeFile(file, html, 'utf-8');
+            logger.info('Pinned WhatsApp Web build downloaded', {version, file, bytes: html.length});
+        } catch (err) {
+            logger.error(
+                'Pinned WhatsApp Web build could not be fetched; the session will load whatever ' +
+                    'WhatsApp serves. Put the file on the session volume by hand to pin it anyway.',
+                {version, url, file, reason: this.summarizeError(err)},
+            );
+        }
+    }
+
+    /**
      * Records which WhatsApp Web build the session actually loaded. The injected helpers talk
      * to that build's internals, so when they start throwing this line says what to pin
      * WHATSAPP_WEB_VERSION to (or which build broke).
      */
     private async logWebVersion(): Promise<void> {
         try {
-            logger.info('WhatsApp Web version in use', {
-                version: await this.client.getWWebVersion(),
-                pinned: config.whatsapp.webVersion ?? null,
-            });
+            const version = await this.client.getWWebVersion();
+            const pinned = config.whatsapp.webVersion ?? null;
+            // A pin that did not take is the quietest failure here: the session runs on a build
+            // nobody chose, and everything downstream is explained by the wrong thing.
+            if (pinned && version !== pinned) {
+                logger.error('WhatsApp Web build is NOT the pinned one; the pin did not take', {
+                    version,
+                    pinned,
+                });
+                return;
+            }
+            logger.info('WhatsApp Web version in use', {version, pinned});
         } catch (err) {
             logger.warn('Could not read the WhatsApp Web version', err);
         }
