@@ -940,6 +940,12 @@ export class WhatsappService {
                             mimetype: String(data?.mimetype),
                             hasMediaObject: Boolean(data?.mediaObject),
                         }));
+
+                        // An entry for the install itself, so an empty trail and an old build
+                        // cannot be mistaken for each other: no field at all means the page is
+                        // not running this code, while just this line means nothing has been
+                        // sent since it loaded.
+                        record({step: 'trace installed'});
                         scope.__k2MediaTraceInstalled = true;
                     }
 
