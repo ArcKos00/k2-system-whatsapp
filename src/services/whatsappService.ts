@@ -87,9 +87,17 @@ export interface MediaPrepReport {
     /** The image the probe prepped: its edge in pixels (0 for the built-in 8x8) and its size. */
     probePixels?: number;
     probeBytes?: number;
+    /** Which identities the account still has. A send goes out under one of them. */
+    meLidUser?: string;
+    mePnUser?: string;
+    meUserError?: string;
     /** Only when a chat id was given: whether the send path's very first call still works. */
     chatResolved?: boolean;
     chatError?: string;
+    chatIsGroup?: boolean;
+    chatIsLid?: boolean;
+    groupMetadataLoaded?: boolean;
+    groupLidAddressing?: boolean;
     /** What the prep had produced the last time it came back without a filehash. */
     lastPrepFailure?: Record<string, unknown>;
     /** The last few calls the send made after the prep, and which of them threw. */
@@ -941,6 +949,18 @@ export class WhatsappService {
                             hasMediaObject: Boolean(data?.mediaObject),
                         }));
 
+                        // The call the message is actually handed to. Everything before it now
+                        // reports ok, so this is where the failure has to be — and the identities
+                        // it carries are the ones the library had to guess at.
+                        const widOf = (value: Loose): string =>
+                            String(value?._serialized ?? value?.user ?? value ?? 'undefined');
+                        wrap('WAWebSendMsgChatAction', 'addAndSendMsgToChat', ([, message]) => ({
+                            from: widOf(message?.from),
+                            to: widOf(message?.to),
+                            participant: widOf(message?.participant),
+                            msgType: String(message?.type),
+                        }));
+
                         // An entry for the install itself, so an empty trail and an old build
                         // cannot be mistaken for each other: no field at all means the page is
                         // not running this code, while just this line means nothing has been
@@ -1075,10 +1095,30 @@ export class WhatsappService {
 
                     // Every send, with a file or without, resolves the chat first. If this is what
                     // throws, the media path was never the problem.
+                    // Who the account is, in both addressing schemes. A send picks one of these
+                    // as the message's `from`, and WhatsApp's move to LID means the other can
+                    // simply not exist any more — which no error here would ever say out loud.
+                    const meUsers = load('WAWebUserPrefsMeUser');
+                    const widText = (value: Loose): string =>
+                        String(value?._serialized ?? value?.user ?? value ?? 'undefined');
+                    try {
+                        report.meLidUser = widText(meUsers?.getMaybeMeLidUser?.());
+                        report.mePnUser = widText(meUsers?.getMaybeMePnUser?.());
+                    } catch (err) {
+                        report.meUserError = err instanceof Error ? err.message : String(err);
+                    }
+
                     if (probeChatId) {
                         try {
                             const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
                             report.chatResolved = Boolean(chat);
+                            report.chatIsGroup = Boolean(chat?.id?.isGroup?.());
+                            report.chatIsLid = Boolean(chat?.id?.isLid?.());
+                            // The one field that decides which identity a group send goes out
+                            // under. Absent metadata is not the same as "not LID": it makes the
+                            // library fall back to the phone-number identity either way.
+                            report.groupMetadataLoaded = Boolean(chat?.groupMetadata);
+                            report.groupLidAddressing = Boolean(chat?.groupMetadata?.isLidAddressingMode);
                         } catch (err) {
                             report.chatResolved = false;
                             report.chatError = err instanceof Error ? err.message : String(err);
