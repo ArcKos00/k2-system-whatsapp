@@ -1,6 +1,6 @@
-import { Controller, Get, Route, Tags } from 'tsoa';
+import { Controller, Get, Query, Route, Tags } from 'tsoa';
 import { injectable } from 'tsyringe';
-import { WhatsappService, WhatsAppStatus } from '../services/whatsappService';
+import { MediaPrepReport, WhatsappService, WhatsAppStatus } from '../services/whatsappService';
 
 export interface HealthResponse {
   status: 'ok';
@@ -24,6 +24,20 @@ export class HealthController extends Controller {
   @Get()
   public async health(): Promise<HealthResponse> {
     return { status: 'ok', whatsapp: this.whatsapp.getStatus() };
+  }
+
+  /**
+   * What WhatsApp Web's own media prep does with a file right now, without sending anything.
+   *
+   * Everything past the prep is keyed by the `filehash` it returns, and a build that stops
+   * returning one takes every media send down with a minified page error that names nothing.
+   * This preps an 8x8 JPEG and reports what came back, whether the hash could then be looked
+   * up, and — with `chatId` — whether the send path's first call, resolving the chat, still
+   * works. Read it when sends fail and the message blames the prep.
+   */
+  @Get('media-prep')
+  public async mediaPrep(@Query() chatId?: string): Promise<MediaPrepReport> {
+    return this.whatsapp.inspectMediaPrep(chatId);
   }
 }
 

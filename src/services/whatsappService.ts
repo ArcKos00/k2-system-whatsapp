@@ -12,6 +12,7 @@ import {canSendInline, resolveMimetype, verifiedMimetype} from '../utils/mediaKi
 import {RabbitMqPublisher} from './rabbitMqPublisher';
 import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
+    AppError,
     BadAttachmentError,
     ChatNotFoundError,
     InvalidChatIdError,
@@ -72,14 +73,20 @@ interface ChatDescriptor {
  * WhatsApp's bundle. `filledByShim` says the hash was ours, `resultKeys` describes what the
  * prep handed back when it was not, which is what a fix would have to be written against.
  */
-interface MediaPrepReport {
+export interface MediaPrepReport {
     shimInstalled: boolean;
     detail?: string;
     hasFilehash?: boolean;
     filledByShim?: boolean;
     resultKeys?: string[];
     blobKind?: string;
+    /** Whether the hash could then be looked up the way the library does it. */
+    mediaObjectResolved?: boolean;
+    mediaObjectError?: string;
     probeError?: string;
+    /** Only when a chat id was given: whether the send path's very first call still works. */
+    chatResolved?: boolean;
+    chatError?: string;
 }
 
 /** Chat id servers the gateway will send to, and how the odd spellings map onto them. */
@@ -333,7 +340,9 @@ export class WhatsappService {
                 sentMessages += 1;
             }
         } catch (err) {
-            if (err instanceof BadAttachmentError) throw err;
+            // An AppError already carries the status and the explanation; wrapping it again
+            // would bury both under a second "Failed to send WhatsApp message:".
+            if (err instanceof AppError) throw err;
             if (this.isTransientFrameError(err)) {
                 void this.recoverFromFrameError(err);
                 throw new WhatsAppNotReadyError();
@@ -794,14 +803,14 @@ export class WhatsappService {
      * one log line per session says whether prep is healthy, whether our hash rescued it, or —
      * when neither holds — what shape the prep now returns.
      */
-    private async inspectMediaPrep(): Promise<void> {
+    public async inspectMediaPrep(chatId?: string): Promise<MediaPrepReport> {
         const page = this.client.pupPage;
         if (!page) {
-            return;
+            return {shimInstalled: false, detail: 'the browser page is not open'};
         }
 
         try {
-            const report = await page.evaluate(async (probeJpegBase64: string) => {
+            const report = await page.evaluate(async (probeJpegBase64: string, probeChatId: string) => {
                 type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
                 const scope = globalThis as unknown as Loose;
                 const report: Loose = {shimInstalled: false};
@@ -900,23 +909,52 @@ export class WhatsappService {
                     report.filledByShim = (scope.__k2MediaPrepShimHits ?? 0) > hitsBefore;
                     report.resultKeys = mediaData ? Object.keys(mediaData).slice(0, 40) : [];
                     report.blobKind = mediaData?.mediaBlob?.constructor?.name;
+
+                    // The step the send actually dies on: the hash goes into a memoized page
+                    // store, and it is that store — not the prep — that throws about an id
+                    // property. Running it here says which of the two is the broken one.
+                    try {
+                        const storage = load('WAWebMediaStorage');
+                        const mediaObject = storage?.getOrCreateMediaObject(mediaData?.filehash);
+                        report.mediaObjectResolved = Boolean(mediaObject);
+                    } catch (err) {
+                        report.mediaObjectResolved = false;
+                        report.mediaObjectError = err instanceof Error ? err.message : String(err);
+                    }
                 } catch (err) {
                     report.probeError = err instanceof Error ? err.message : String(err);
                 }
 
+                // Every send, with a file or without, resolves the chat first. If this is what
+                // throws, the media path was never the problem.
+                if (probeChatId) {
+                    try {
+                        const chat = await (scope.WWebJS as Loose).getChat(probeChatId, {getAsModel: false});
+                        report.chatResolved = Boolean(chat);
+                    } catch (err) {
+                        report.chatResolved = false;
+                        report.chatError = err instanceof Error ? err.message : String(err);
+                    }
+                }
+
                 return report;
-            }, PROBE_JPEG_BASE64);
+            }, PROBE_JPEG_BASE64, chatId ?? '');
 
             const details = report as MediaPrepReport;
-            if (details.hasFilehash && !details.filledByShim) {
+            if (details.hasFilehash && details.mediaObjectResolved && !details.filledByShim) {
                 logger.info('WhatsApp media prep is healthy', details);
-            } else if (details.hasFilehash) {
+            } else if (details.hasFilehash && details.mediaObjectResolved) {
                 logger.warn('WhatsApp media prep no longer returns a filehash; ours is filling in', details);
             } else {
                 logger.error('WhatsApp media prep is broken and could not be repaired', details);
             }
+            return details;
         } catch (err) {
             logger.warn('Could not inspect WhatsApp media prep', err);
+            return {
+                shimInstalled: false,
+                detail: err instanceof Error ? err.message : String(err),
+            };
         }
     }
 

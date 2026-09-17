@@ -213,6 +213,9 @@ account cannot see returns `404 WA_CHAT_NOT_FOUND`.
   instead. A send that still fails is reported as `502 WA_SEND_FAILED` naming the prep — it is
   the build, not the file, so the fix is pinning `WHATSAPP_WEB_VERSION` (see below), and the
   media must not be dropped in the meantime.
+- `GET /health/media-prep` runs that same check on demand and answers with what it found;
+  `?chatId=<id>` also resolves that chat, which is the one call every send makes before the
+  media path is even reached. It sends nothing and needs no token.
 - `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
   for bulk sending. WhatsApp may ban numbers that automate aggressively.
 - The number is validated with `getNumberId` before sending; unknown numbers
