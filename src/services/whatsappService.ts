@@ -1861,7 +1861,7 @@ export class WhatsappService {
         try {
             await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
         } catch (err) {
-            await this.logPrepSnapshot(media);
+            await this.logPrepSnapshot(chatId, media);
             throw this.asMediaFailure(err, media);
         }
     }
@@ -1874,7 +1874,7 @@ export class WhatsappService {
      * "this build stopped returning the field" and "the renderer ran out of room on a full-size
      * photo", so it is worth one page call on a failure.
      */
-    private async logPrepSnapshot(media: MessageMedia): Promise<void> {
+    private async logPrepSnapshot(chatId: string, media: MessageMedia): Promise<void> {
         const page = this.client.pupPage;
         if (!page) return;
         try {
@@ -1882,6 +1882,7 @@ export class WhatsappService {
                 const scope = globalThis as unknown as Record<string, unknown>;
                 return {snapshot: scope.__k2LastPrepFailure, trace: scope.__k2MediaTrace};
             });
+            logger.error('WhatsApp send identities', await this.readSendIdentities(chatId));
             logger.error('WhatsApp media send failed; page trace follows', {
                 filename: media.filename,
                 size: media.filesize,
@@ -1902,6 +1903,70 @@ export class WhatsappService {
             }
         } catch (err) {
             logger.warn('Could not read the media prep snapshot', err);
+        }
+    }
+
+    /**
+     * Who the account is, and what this build's MsgKey makes of the fields the library feeds it.
+     *
+     * The trace says the send fails on a key whose `from` is undefined while everything going in
+     * was right, and that only a probe by hand would have shown. Running it on the failure itself
+     * puts the answer in the same log as the failure, instead of behind a call someone has to
+     * remember to make.
+     */
+    private async readSendIdentities(chatId: string): Promise<Record<string, unknown>> {
+        const page = this.client.pupPage;
+        if (!page) return {detail: 'the browser page is not open'};
+        try {
+            return await page.evaluate(async (probeChatId: string) => {
+                type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+                const scope = globalThis as unknown as Loose;
+                const load = (name: string): Loose | undefined => {
+                    try {
+                        return scope.require(name);
+                    } catch {
+                        return undefined;
+                    }
+                };
+                const widText = (value: Loose): string =>
+                    String(value?._serialized ?? value?.user ?? value ?? 'undefined');
+
+                const out: Loose = {};
+                const meUsers = load('WAWebUserPrefsMeUser');
+                out.meLidUser = widText(meUsers?.getMaybeMeLidUser?.());
+                out.mePnUser = widText(meUsers?.getMaybeMePnUser?.());
+
+                try {
+                    const MsgKey = load('WAWebMsgKey') as unknown as {
+                        new (fields: Loose): Loose;
+                        newId(): Promise<string>;
+                    };
+                    const widFactory = load('WAWebWidFactory');
+                    const from = meUsers?.getMaybeMeLidUser?.() ?? meUsers?.getMaybeMePnUser?.();
+                    const key = new MsgKey({
+                        from,
+                        to: probeChatId ? widFactory?.createWid(probeChatId) : undefined,
+                        id: await MsgKey.newId(),
+                        participant: from,
+                        selfDir: 'out',
+                    });
+                    out.msgKey = {
+                        from: widText(key.from),
+                        to: widText(key.to),
+                        remote: widText(key.remote),
+                        participant: widText(key.participant),
+                        fromMe: key.fromMe,
+                        selfDir: String(key.selfDir),
+                        serialized: String(key._serialized),
+                        ownKeys: Object.keys(key).slice(0, 30),
+                    };
+                } catch (err) {
+                    out.msgKeyError = err instanceof Error ? err.message : String(err);
+                }
+                return out;
+            }, chatId);
+        } catch (err) {
+            return {detail: err instanceof Error ? err.message : String(err)};
         }
     }
 
