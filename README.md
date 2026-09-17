@@ -201,6 +201,16 @@ account cannot see returns `404 WA_CHAT_NOT_FOUND`.
   match its name — a video or an HTML error page saved as `.jpeg` — is sent under the type the
   content implies, because WhatsApp Web decodes photos and videos in the page before uploading
   and a mislabelled one breaks that prep instead of being refused.
+- **Media sends and the `__x_id` collision.** `processMediaData` returns a MediaData model that
+  carries a private `__x_id`, and whatsapp-web.js spreads that model into the outgoing message,
+  where the field shadows the message's own id. The send is then built around a message with no
+  key, and WhatsApp throws `Data passed to getter must include an id property (it's how we
+  memoize) but got undefined` from `getValidatedSender` while initialising it. Only media sends
+  carry that field; text was never affected. Upstream fixes it by deleting the field
+  (wwebjs #201922, #201923); until that is released the gateway does the same in the page.
+  Worth remembering how this reads from the outside: the message names nothing, and the media
+  path is where the undefined lands, so it looks for a long time like a problem with the
+  attachments. It is not — the file preps, hashes and uploads to WhatsApp's servers cleanly.
 - An empty attachment returns `400 BAD_ATTACHMENT` and is never sent; the caller's retry policy
   should treat it as final, since the same upload cannot succeed.
 - Every attachment is prepared by WhatsApp Web itself before the upload, and everything after
@@ -256,7 +266,8 @@ past it, so `version in use` comes back as the current build anyway. The machine
 it costs nothing, and `version in use` is logged as an error when it disagrees with the pin, so a
 pin that silently does not take can never look like one that did.
 
-The drift it was meant to cure, for the record: The build WhatsApp was serving had
+The break it was reached for turned out not to be a drift at all — see below. For the record,
+what the trail said along the way: The build WhatsApp was serving had
 slimmed `MsgKey` down to `{fromMe, remote, id, participant}` — the `from`, `to`, `selfDir` and
 `_serialized` the library fills in and reads back are gone — so every send built a key WhatsApp
 could not index and died on `Data passed to getter must include an id property`. Worth knowing

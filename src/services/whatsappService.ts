@@ -1061,49 +1061,26 @@ export class WhatsappService {
                         const widOf = (value: Loose): string =>
                             String(value?._serialized ?? value?.user ?? value ?? 'undefined');
                         wrap('WAWebSendMsgChatAction', 'addAndSendMsgToChat', ([chat, message]) => {
-                            // The participant lives on the message key, never on the message —
-                            // reading it off the message was always going to say "undefined".
-                            // In a group it is what identifies us among the members, and the
-                            // library only fills it in when it recognises the chat as a group.
+                            // The send itself, fixed the way upstream fixes it (wwebjs #201922,
+                            // #201923). processMediaData returns a MediaData model carrying a
+                            // private __x_id, and the library spreads that model into the outgoing
+                            // message — where __x_id shadows the Msg's own id. The message then has
+                            // no key to speak of, and WhatsApp's getValidatedSender throws about a
+                            // missing id property while initialising it. Only media sends carry
+                            // that field, which is why text was never affected.
+                            const mediaIdRemoved = Boolean(message) && '__x_id' in message;
+                            if (mediaIdRemoved) {
+                                delete message.__x_id;
+                            }
+
                             const key = message?.id as Loose | undefined;
-                            const isGroup = widOf(message?.to).endsWith('@g.us');
-                            let repaired = false;
-                            if (isGroup && key && !key.participant && message?.from) {
-                                try {
-                                    key.participant = load('WAWebWidFactory')?.asUserWidOrThrow(message.from);
-                                    repaired = Boolean(key.participant);
-                                } catch {
-                                    // Leave it as it was; the trace still says it was missing.
-                                }
-                            }
-
-                            // In a group the sender is the author, and the library only ever sets
-                            // that field for a status update — never for a group send. WhatsApp
-                            // resolves the sender off it (the failing stack is getValidatedSender
-                            // -> getSender), so without it the send is handed a message nobody
-                            // appears to have written.
-                            let authorRepaired = false;
-                            if (isGroup && message && !message.author && message.from) {
-                                message.author = message.from;
-                                authorRepaired = true;
-                            }
-
                             return {
                                 from: widOf(message?.from),
                                 to: widOf(message?.to),
                                 author: widOf(message?.author),
                                 keyParticipant: widOf(key?.participant),
-                                keyFrom: widOf(key?.from),
-                                participantRepaired: repaired,
-                                authorRepaired,
-                                chatIsGroup:
-                                    typeof chat?.id?.isGroup === 'function'
-                                        ? chat.id.isGroup()
-                                        : 'isGroup is not a function',
-                                chatIsLid:
-                                    typeof chat?.id?.isLid === 'function'
-                                        ? chat.id.isLid()
-                                        : 'isLid is not a function',
+                                keySerialized: String(key?._serialized ?? key ?? 'undefined'),
+                                mediaIdRemoved,
                                 msgType: String(message?.type),
                             };
                         });
