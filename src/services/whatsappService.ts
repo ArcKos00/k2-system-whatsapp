@@ -917,6 +917,32 @@ export class WhatsappService {
                                             },
                                         );
                                     }
+
+                                    // Some of these hand back an array of promises rather than a
+                                    // promise, and returning them settled is not ours to do — so
+                                    // they are watched from the side. The observer swallows the
+                                    // rejection it sees, which is the caller's to handle, not a
+                                    // second unhandled one.
+                                    const pending: Loose[] = Array.isArray(result)
+                                        ? result.filter((entry) => typeof entry?.then === 'function')
+                                        : [];
+                                    if (pending.length > 0) {
+                                        record({step: fnName, ...info, ok: 'pending'});
+                                        pending.forEach((promise, index) => {
+                                            promise.then(
+                                                () => record({step: `${fnName}[${index}]`, ok: true}),
+                                                (err: Loose) =>
+                                                    record({
+                                                        step: `${fnName}[${index}]`,
+                                                        ...info,
+                                                        ok: false,
+                                                        error: String(err?.message ?? err),
+                                                    }),
+                                            );
+                                        });
+                                        return result;
+                                    }
+
                                     record({step: fnName, ...info, ok: true});
                                     return result;
                                 } catch (err) {
@@ -954,12 +980,39 @@ export class WhatsappService {
                         // it carries are the ones the library had to guess at.
                         const widOf = (value: Loose): string =>
                             String(value?._serialized ?? value?.user ?? value ?? 'undefined');
-                        wrap('WAWebSendMsgChatAction', 'addAndSendMsgToChat', ([, message]) => ({
-                            from: widOf(message?.from),
-                            to: widOf(message?.to),
-                            participant: widOf(message?.participant),
-                            msgType: String(message?.type),
-                        }));
+                        wrap('WAWebSendMsgChatAction', 'addAndSendMsgToChat', ([chat, message]) => {
+                            // The participant lives on the message key, never on the message —
+                            // reading it off the message was always going to say "undefined".
+                            // In a group it is what identifies us among the members, and the
+                            // library only fills it in when it recognises the chat as a group.
+                            const key = message?.id as Loose | undefined;
+                            const isGroup = widOf(message?.to).endsWith('@g.us');
+                            let repaired = false;
+                            if (isGroup && key && !key.participant && message?.from) {
+                                try {
+                                    key.participant = load('WAWebWidFactory')?.asUserWidOrThrow(message.from);
+                                    repaired = Boolean(key.participant);
+                                } catch {
+                                    // Leave it as it was; the trace still says it was missing.
+                                }
+                            }
+                            return {
+                                from: widOf(message?.from),
+                                to: widOf(message?.to),
+                                keyParticipant: widOf(key?.participant),
+                                keyFrom: widOf(key?.from),
+                                participantRepaired: repaired,
+                                chatIsGroup:
+                                    typeof chat?.id?.isGroup === 'function'
+                                        ? chat.id.isGroup()
+                                        : 'isGroup is not a function',
+                                chatIsLid:
+                                    typeof chat?.id?.isLid === 'function'
+                                        ? chat.id.isLid()
+                                        : 'isLid is not a function',
+                                msgType: String(message?.type),
+                            };
+                        });
 
                         // An entry for the install itself, so an empty trail and an old build
                         // cannot be mistaken for each other: no field at all means the page is
