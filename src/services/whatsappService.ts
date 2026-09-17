@@ -1697,11 +1697,12 @@ export class WhatsappService {
         const detail = err instanceof Error ? err.message : String(err);
         if (!MEDIA_PREP_FAILURE.test(detail)) return err;
         return new MessageSendError(
-            `WhatsApp Web's media prep returned nothing for '${media.filename ?? 'attachment'}' ` +
+            `WhatsApp Web's media prep gave up on '${media.filename ?? 'attachment'}' ` +
             `(${media.mimetype}, ${media.filesize ?? 'unknown'} bytes), so the upload had no filehash to ` +
-            `key on. When every file fails this way the loaded WhatsApp Web build has moved past the ` +
-            `library — see the 'WhatsApp media prep' line this session logs on ready, and pin ` +
-            `WHATSAPP_WEB_VERSION to a build that still works. Underlying failure: ${detail}`,
+            `key on. GET /health/media-prep says which step is at fault: if a small image passes and ` +
+            `?pixels=2048 does not, the renderer is out of room (WHATSAPP_RENDERER_HEAP_MB); if even a ` +
+            `small one fails, the WhatsApp Web build has moved past the library and wants pinning. ` +
+            `Underlying failure: ${detail}`,
         );
     }
 
