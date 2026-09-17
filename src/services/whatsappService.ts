@@ -91,8 +91,9 @@ export interface MediaPrepReport {
     meLidUser?: string;
     mePnUser?: string;
     meUserError?: string;
-    /** A key WhatsApp built itself, to hold the library's one against. */
+    /** A key and a message WhatsApp built itself, to hold the library's ones against. */
     realKey?: unknown;
+    realMessage?: unknown;
     realKeyError?: string;
     /** Only when a chat id was given: whether the send path's very first call still works. */
     chatResolved?: boolean;
@@ -1075,12 +1076,26 @@ export class WhatsappService {
                                     // Leave it as it was; the trace still says it was missing.
                                 }
                             }
+
+                            // In a group the sender is the author, and the library only ever sets
+                            // that field for a status update — never for a group send. WhatsApp
+                            // resolves the sender off it (the failing stack is getValidatedSender
+                            // -> getSender), so without it the send is handed a message nobody
+                            // appears to have written.
+                            let authorRepaired = false;
+                            if (isGroup && message && !message.author && message.from) {
+                                message.author = message.from;
+                                authorRepaired = true;
+                            }
+
                             return {
                                 from: widOf(message?.from),
                                 to: widOf(message?.to),
+                                author: widOf(message?.author),
                                 keyParticipant: widOf(key?.participant),
                                 keyFrom: widOf(key?.from),
                                 participantRepaired: repaired,
+                                authorRepaired,
                                 chatIsGroup:
                                     typeof chat?.id?.isGroup === 'function'
                                         ? chat.id.isGroup()
@@ -2036,6 +2051,17 @@ export class WhatsappService {
                     // An outgoing one is the like-for-like comparison.
                     const outgoing = messages.filter((message) => message?.id?.fromMe);
                     const real = (outgoing[outgoing.length - 1] ?? messages[messages.length - 1])?.id;
+                    const realMessage = (outgoing[outgoing.length - 1] ?? messages[messages.length - 1]);
+                    out.realMessage = realMessage
+                        ? {
+                              keys: Object.keys(realMessage).slice(0, 60),
+                              from: widText(realMessage.from),
+                              to: widText(realMessage.to),
+                              author: widText(realMessage.author),
+                              type: String(realMessage.type),
+                              fromMe: realMessage.id?.fromMe,
+                          }
+                        : 'no messages to read';
                     out.realKey = real
                         ? {
                               ownKeys: Object.keys(real),
