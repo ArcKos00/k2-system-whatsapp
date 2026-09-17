@@ -92,6 +92,8 @@ export interface MediaPrepReport {
     chatError?: string;
     /** What the prep had produced the last time it came back without a filehash. */
     lastPrepFailure?: Record<string, unknown>;
+    /** The last few calls the send made after the prep, and which of them threw. */
+    mediaTrace?: Record<string, unknown>[];
 }
 
 /** Chat id servers the gateway will send to, and how the odd spellings map onto them. */
@@ -867,6 +869,80 @@ export class WhatsappService {
                         return undefined;
                     };
 
+                    // ---- a trace over everything the send does after the prep ----
+                    // The prep is provably healthy, so the memoized getter that throws may well
+                    // be one of the steps behind it. Each is wrapped by hand rather than through
+                    // injectToFunction, whose fallback would call a failing upload a second time.
+                    if (!scope.__k2MediaTraceInstalled) {
+                        const record = (entry: Loose): void => {
+                            const trail: Loose[] = (scope.__k2MediaTrace ??= []);
+                            trail.push({at: new Date().toISOString(), ...entry});
+                            if (trail.length > 20) trail.shift();
+                        };
+
+                        const wrap = (
+                            moduleName: string,
+                            fnName: string,
+                            describe: (args: Loose[]) => Loose,
+                        ): void => {
+                            const target = moduleName ? load(moduleName) : (scope.WWebJS as Loose);
+                            const original = target?.[fnName];
+                            if (typeof original !== 'function') {
+                                record({step: fnName, missing: moduleName || 'WWebJS'});
+                                return;
+                            }
+                            (target as Loose)[fnName] = function (this: unknown, ...args: Loose[]) {
+                                const info = describe(args);
+                                const failed = (err: Loose): void =>
+                                    record({step: fnName, ...info, ok: false, error: String(err?.message ?? err)});
+                                try {
+                                    const result = original.apply(this, args);
+                                    if (typeof result?.then === 'function') {
+                                        return result.then(
+                                            (value: unknown) => {
+                                                record({step: fnName, ...info, ok: true});
+                                                return value;
+                                            },
+                                            (err: Loose) => {
+                                                failed(err);
+                                                throw err;
+                                            },
+                                        );
+                                    }
+                                    record({step: fnName, ...info, ok: true});
+                                    return result;
+                                } catch (err) {
+                                    failed(err as Loose);
+                                    throw err;
+                                }
+                            };
+                        };
+
+                        wrap('', 'processMediaData', ([mediaInfo, options]) => ({
+                            mimetype: mediaInfo?.mimetype,
+                            asDocument: Boolean(options?.forceDocument),
+                        }));
+                        wrap('WAWebMediaStorage', 'getOrCreateMediaObject', (args) => {
+                            const filehash: unknown = args[0];
+                            return {
+                                filehash:
+                                    typeof filehash === 'string'
+                                        ? `${filehash.slice(0, 10)}... (${filehash.length} chars)`
+                                        : String(filehash),
+                            };
+                        });
+                        wrap('WAWebMmsMediaTypes', 'msgToMediaType', ([msg]) => ({
+                            msgType: String(msg?.type),
+                            isGif: Boolean(msg?.isGif),
+                        }));
+                        wrap('WAWebMediaMmsV4Upload', 'uploadMedia', ([data]) => ({
+                            mediaType: String(data?.mediaType),
+                            mimetype: String(data?.mimetype),
+                            hasMediaObject: Boolean(data?.mediaObject),
+                        }));
+                        scope.__k2MediaTraceInstalled = true;
+                    }
+
                     const wwebjs = scope.WWebJS as Loose | undefined;
                     if (scope.__k2MediaPrepShim) {
                         report.shimInstalled = true;
@@ -1004,6 +1080,7 @@ export class WhatsappService {
                     }
 
                     report.lastPrepFailure = scope.__k2LastPrepFailure;
+                    report.mediaTrace = scope.__k2MediaTrace;
                     return report;
                 },
                 PROBE_JPEG_BASE64,
@@ -1666,9 +1743,15 @@ export class WhatsappService {
         const page = this.client.pupPage;
         if (!page) return;
         try {
-            const snapshot = await page.evaluate(
-                () => (globalThis as unknown as Record<string, unknown>).__k2LastPrepFailure,
-            );
+            const {snapshot, trace} = await page.evaluate(() => {
+                const scope = globalThis as unknown as Record<string, unknown>;
+                return {snapshot: scope.__k2LastPrepFailure, trace: scope.__k2MediaTrace};
+            });
+            logger.error('WhatsApp media send failed; page trace follows', {
+                filename: media.filename,
+                size: media.filesize,
+                trace,
+            });
             if (snapshot) {
                 logger.error('WhatsApp media prep gave up on this file', {
                     filename: media.filename,
