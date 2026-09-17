@@ -197,6 +197,16 @@ account cannot see returns `404 WA_CHAT_NOT_FOUND`.
   codec — the same file is re-sent as a document. Everything else (PDF, Office, GIF,
   archives…) is sent as a document from the start. A generic `application/octet-stream`
   mimetype is replaced by the type implied by the file extension.
+- An attachment's first bytes have the final say over its type. A file whose content does not
+  match its name — a video or an HTML error page saved as `.jpeg` — is sent under the type the
+  content implies, because WhatsApp Web decodes photos and videos in the page before uploading
+  and a mislabelled one breaks that prep instead of being refused.
+- A file WhatsApp cannot prepare at all (empty, truncated, or a format its in-page prep chokes
+  on) returns `400 BAD_ATTACHMENT`, not `502 WA_SEND_FAILED`. The distinction matters to the
+  caller's retry policy: the same bytes fail the same way on every attempt, so this one must
+  not be retried. In the page such a failure surfaces as WhatsApp's own minified
+  `Data passed to getter must include an id property (it's how we memoize) but got undefined`,
+  thrown when the library hands the missing filehash to an in-page getter.
 - `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
   for bulk sending. WhatsApp may ban numbers that automate aggressively.
 - The number is validated with `getNumberId` before sending; unknown numbers

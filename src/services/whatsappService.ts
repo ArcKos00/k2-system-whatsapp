@@ -8,7 +8,7 @@ import {dirname, join} from 'node:path';
 import {singleton} from 'tsyringe';
 import {config} from '../config/env';
 import {logger} from '../utils/logger';
-import {canSendInline, resolveMimetype} from '../utils/mediaKind';
+import {canSendInline, resolveMimetype, verifiedMimetype} from '../utils/mediaKind';
 import {RabbitMqPublisher} from './rabbitMqPublisher';
 import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
@@ -79,6 +79,18 @@ const CHAT_KIND_BY_SERVER: Record<string, ChatKind> = {
 const TRANSIENT_FRAME_ERROR =
     /detached Frame|Execution context was destroyed|Session closed|Target closed|Protocol error|Most likely the page has been closed/i;
 
+/**
+ * How a failure of WhatsApp's own in-page media prep reads by the time it reaches us.
+ *
+ * The prep decodes and re-encodes the file inside the page. When it yields nothing the library
+ * passes the missing filehash straight into a memoized in-page getter, so what surfaces is
+ * WhatsApp's minified complaint about an id property rather than anything about the file. Its
+ * own guard for the same case (`media-fault: ... filehash undefined`) sits one statement too
+ * late to ever run, so both spellings are matched here.
+ */
+const MEDIA_PREP_FAILURE =
+    /must include an id property|media-fault|filehash undefined|upload failed: media entry was not created/i;
+
 const CHROMIUM_LOCK_FILES = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
 
 const PUPPETEER_ARGS = [
@@ -97,6 +109,12 @@ const PUPPETEER_ARGS = [
 ];
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** How many bytes a base64 payload holds, without decoding it. */
+const base64ByteLength = (data: string): number => {
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+};
 
 const toSeconds = (value: unknown): number => (typeof value === 'number' ? value : 0);
 
@@ -1326,7 +1344,7 @@ export class WhatsappService {
     private async sendMedia(chatId: string, media: MessageMedia, caption: string | undefined): Promise<void> {
         const options = caption ? {caption} : {};
         if (!canSendInline(media.mimetype)) {
-            await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
+            await this.sendAsDocument(chatId, media, options);
             return;
         }
 
@@ -1338,19 +1356,79 @@ export class WhatsappService {
                 chatId,
                 filename: media.filename,
                 mimetype: media.mimetype,
+                size: media.filesize,
                 reason: err instanceof Error ? err.message : String(err),
             });
+            await this.sendAsDocument(chatId, media, options);
+        }
+    }
+
+    private async sendAsDocument(chatId: string, media: MessageMedia, options: {caption?: string}): Promise<void> {
+        try {
             await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
+        } catch (err) {
+            throw this.asMediaFailure(err, media);
         }
     }
 
     /**
-     * Wrap an attachment for the library, with a mimetype we can trust. A caller that sends
-     * `application/octet-stream` for a JPEG would otherwise get a document card instead of a
-     * photo; the file extension usually knows better, so it gets the final say over a
-     * generic type.
+     * The document attempt is the last one, so its failure is where a bad file gets named.
+     *
+     * A file WhatsApp cannot prepare fails the same way on every retry, so reporting it as a
+     * gateway fault (502) only makes the caller's retry policy spend ten attempts on it. It is
+     * reported as a bad attachment (400) instead, with what we know about the file, and only
+     * genuine connection failures are left to travel on as they are.
+     */
+    private asMediaFailure(err: unknown, media: MessageMedia): unknown {
+        if (this.isTransientFrameError(err)) return err;
+        const detail = err instanceof Error ? err.message : String(err);
+        if (!MEDIA_PREP_FAILURE.test(detail)) return err;
+        return new BadAttachmentError(
+            `WhatsApp could not prepare '${media.filename ?? 'attachment'}' (${media.mimetype}, ` +
+            `${media.filesize ?? 'unknown'} bytes) — the file is truncated, or is not the format it claims ` +
+            `to be. Sending it again will fail the same way. Underlying failure: ${detail}`,
+        );
+    }
+
+    /**
+     * Wrap an attachment for the library, with a mimetype and a size we can trust.
+     *
+     * WhatsApp Web decodes a photo or a video in the page before uploading it, and a file that
+     * cannot survive that — no content at all, or bytes that are not the format its name claims
+     * — does not come back as a refusal but takes the send down inside WhatsApp's own bundle.
+     * So the content is checked here, while the file can still be named in the error, and the
+     * bytes are given the final say over what the caller declared.
      */
     private toMessageMedia(file: MediaAttachment): MessageMedia {
+        const media = this.readAttachment(file);
+        const size = base64ByteLength(media.data);
+        if (size === 0) {
+            throw new BadAttachmentError(`'${media.filename ?? 'attachment'}' has no content (0 bytes)`);
+        }
+
+        // Only the head is decoded: enough for every magic number, and a video stays out of memory.
+        const head = Buffer.from(media.data.slice(0, 96), 'base64');
+        const {mimetype, declaredMimetype, mismatched} = verifiedMimetype(media.mimetype, media.filename, head);
+        if (mismatched) {
+            logger.warn('Attachment content does not match its declared type; trusting the content', {
+                filename: media.filename,
+                declaredMimetype,
+                mimetype,
+                size,
+            });
+        }
+        media.mimetype = mimetype;
+        media.filesize = size;
+        return media;
+    }
+
+    /**
+     * The attachment as the library wants it, under the mimetype the caller vouched for. A
+     * caller that sends `application/octet-stream` for a JPEG would otherwise get a document
+     * card instead of a photo; the file extension usually knows better, so it gets the final
+     * say over a generic type.
+     */
+    private readAttachment(file: MediaAttachment): MessageMedia {
         if (file.path) {
             const media = MessageMedia.fromFilePath(file.path);
             media.mimetype = resolveMimetype(file.mimetype ?? media.mimetype, file.filename ?? media.filename);
