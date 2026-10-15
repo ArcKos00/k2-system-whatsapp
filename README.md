@@ -57,7 +57,7 @@ documented with **Swagger UI**, and DI via **tsyringe**.
 npm install
 cp .env.example .env          # fill in Keycloak settings
 npm run tsoa                  # generate src/generated/{routes.ts,swagger.json}
-npm run dev                   # ts-node + nodemon (auto-runs tsoa first)
+npm run dev                   # tsc + nodemon (auto-runs tsoa first)
 ```
 
 On first run, no WhatsApp session exists. The HTTP server starts immediately and
@@ -318,6 +318,27 @@ listing will do; anything past the cap is returned with its id only and logged a
 
 Without the endpoint the ids are also visible in the logs: every inbound message logs its
 `chatId`, whether it was forwarded or dropped by the allowlist.
+
+### Processed-message history and restart backfill
+
+Every message the gateway forwards is recorded, per chat, in
+`<WHATSAPP_SESSION_PATH>/processed-messages.json` (`WHATSAPP_HISTORY_PATH`) and kept for a week
+(`WHATSAPP_HISTORY_RETENTION_SEC`). Next to the ids each chat keeps an *anchor*: the newest message
+the chat is confirmed complete through. The anchor never moves past a message RabbitMQ has not
+confirmed, so a message still owed is always found again.
+
+Each reconcile pass — the one on `ready` included — scrolls every chat back until it reaches the
+anchor (doubling `WHATSAPP_CATCHUP_LIMIT_PER_CHAT` up to `WHATSAPP_BACKFILL_MAX_MESSAGES_PER_CHAT`)
+and forwards every later message not already in the history. That is how a restart picks up where
+the last process stopped, and the history is what keeps a rescan from publishing anything twice.
+
+- `WHATSAPP_BACKFILL_ON_START=true` (default): resume. A chat with no anchor yet resumes from the
+  last fully confirmed pass (or the legacy `cursor.json`, if one is still there).
+- `WHATSAPP_BACKFILL_ON_START=false`: start clean. Only messages that arrive after this start are
+  forwarded, whatever the history says.
+- Either way nothing older than `WHATSAPP_BACKFILL_MAX_AGE_SEC` (2 days) is ever forwarded. On a
+  first start with backfill on and no history at all, that means the last 2 days of every
+  forwarded chat.
 
 ### Reconcile back-off
 

@@ -1,5 +1,5 @@
 # ─── Build stage ───────────────────────────────────────────────
-FROM 10.20.50.25:8081/node:20-bookworm-slim AS build
+FROM 10.20.50.25:8081/node:26-bookworm-slim AS build
 WORKDIR /app
 
 # Don't download Chromium during build — the base image provides it.
@@ -16,7 +16,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ─── Runtime stage ─────────────────────────────────────────────
-FROM 10.20.50.25:8081/node:20-bookworm-slim AS runtime
+FROM 10.20.50.25:8081/node:26-bookworm-slim AS runtime
 WORKDIR /app
 
 # Cap the Node heap well below the container memory limit (2Gi) so V8 GCs

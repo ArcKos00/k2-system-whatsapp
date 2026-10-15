@@ -48,6 +48,9 @@ data:
   WHATSAPP_READY_TIMEOUT_MS: "180000"
   WHATSAPP_RECONCILE_MAX_FAILURES: "3"
   WHATSAPP_RECONCILE_BACKOFF_MAX_MS: "900000"
+  # On start, scroll each chat back to the last message it processed (at most 2 days) and
+  # forward what was missed while the pod was down. "false" starts clean from the current moment.
+  WHATSAPP_BACKFILL_ON_START: "true"
   # Pinning the WhatsApp Web build the session loads. Leave unset and whatsapp-web.js asks for
   # its own default build; that build is long gone from wa-version, so its cache quietly falls
   # back to whatever WhatsApp serves today — and the day WhatsApp changes the internals the

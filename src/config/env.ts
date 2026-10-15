@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 function num(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -14,6 +14,14 @@ function list(name: string): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function bool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  return fallback;
 }
 
 function required(name: string): string {
@@ -92,6 +100,26 @@ export const config = {
     rendererHeapMb: num('WHATSAPP_RENDERER_HEAP_MB', 256),
     puppeteerExecutablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     puppeteerChannel: process.env.PUPPETEER_BROWSER_CHANNEL || undefined,
+  },
+
+  history: {
+    /**
+     * Where the processed-message history lives (defaults to <session path>/processed-messages.json).
+     * Keep it on the same durable volume as the session.
+     */
+    path: process.env.WHATSAPP_HISTORY_PATH || undefined,
+    /** How long a forwarded message id is remembered. Never shorter than the backfill window. */
+    retentionSec: num('WHATSAPP_HISTORY_RETENTION_SEC', 7 * 24 * 60 * 60),
+    /**
+     * Whether a start resumes where the last process stopped. On, each chat is scrolled back to
+     * the last message it confirmed and everything after it is forwarded. Off, the service
+     * starts clean: only messages that arrive after this start are forwarded.
+     */
+    backfillOnStart: bool('WHATSAPP_BACKFILL_ON_START', true),
+    /** The furthest back a backfill ever reaches, however long the service was down. */
+    backfillMaxAgeSec: num('WHATSAPP_BACKFILL_MAX_AGE_SEC', 2 * 24 * 60 * 60),
+    /** How many messages one chat may be scrolled back through looking for its anchor. */
+    backfillMaxMessagesPerChat: num('WHATSAPP_BACKFILL_MAX_MESSAGES_PER_CHAT', 1000),
   },
 
   idempotency: {

@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import apm from 'elastic-apm-node';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const explicitlyActive = (process.env.ELASTIC_APM_ACTIVE ?? '').toLowerCase() === 'true';
 const hasServerUrl = !!(process.env.ELASTIC_APM_SERVER_URL ?? '').trim();

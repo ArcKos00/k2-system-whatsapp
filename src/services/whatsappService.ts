@@ -3,13 +3,15 @@ import type {Chat, ClientOptions, Message} from 'whatsapp-web.js';
 import type {ChromeReleaseChannel, LaunchOptions} from 'puppeteer';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
-import {mkdir, rm, readFile, writeFile, rename} from 'node:fs/promises';
+import {mkdir, rm, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {singleton} from 'tsyringe';
 import {config} from '../config/env';
 import {logger} from '../utils/logger';
 import {canSendInline, resolveMimetype, verifiedMimetype} from '../utils/mediaKind';
 import {RabbitMqPublisher} from './rabbitMqPublisher';
+import type {PublishResult} from './rabbitMqPublisher';
+import {ProcessedMessageStore} from './processedMessageStore';
 import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
     AppError,
@@ -189,6 +191,8 @@ const base64ByteLength = (data: string): number => {
 
 const toSeconds = (value: unknown): number => (typeof value === 'number' ? value : 0);
 
+const nowSec = (): number => Math.floor(Date.now() / 1000);
+
 /**
  * The message's serialized id. WhatsApp Web serializes `id` either as the object
  * whatsapp-web.js types (`{_serialized}`) or as the plain string, depending on the build, and
@@ -210,7 +214,6 @@ const messageIdOf = (message: Message): string | undefined => {
 export class WhatsappService {
     private readonly client: Client;
     private readonly qrImagePath: string;
-    private readonly cursorPath: string;
     private readonly webVersionCachePath: string;
 
     private status: WhatsAppStatus = 'initializing';
@@ -233,13 +236,15 @@ export class WhatsappService {
     private reconcileFailures = 0;
     private reconcileRestarts = 0;
     private reconcileBackoffUntil = 0;
-    private cursor = -1;
+    /** When this process started; with backfill off, nothing older than this is forwarded. */
+    private readonly startedAtSec = nowSec();
 
-    constructor(private readonly publisher: RabbitMqPublisher) {
+    constructor(
+        private readonly publisher: RabbitMqPublisher,
+        private readonly history: ProcessedMessageStore,
+    ) {
         this.qrImagePath =
             config.whatsapp.qrImagePath ?? join(config.whatsapp.sessionPath, 'qr.png');
-        this.cursorPath =
-            config.whatsapp.cursorPath ?? join(config.whatsapp.sessionPath, 'cursor.json');
         this.webVersionCachePath =
             config.whatsapp.webVersionCachePath ?? join(config.whatsapp.sessionPath, 'web-versions');
 
@@ -259,7 +264,13 @@ export class WhatsappService {
     }
 
     public async initClient(): Promise<void> {
-        await this.loadCursor();
+        await this.history.load();
+        logger.info(
+            config.history.backfillOnStart
+                ? 'Backfill on: resuming each chat from its last processed message.'
+                : 'Backfill off: forwarding only messages that arrive from now on.',
+            {maxAgeSec: config.history.backfillMaxAgeSec, watermark: this.history.watermark},
+        );
         this.registerEventHandlers();
         await this.clearChromiumLocks();
         this.startHeartbeat();
@@ -307,6 +318,7 @@ export class WhatsappService {
         } catch (err) {
             logger.warn('Error while destroying WhatsApp client', err);
         }
+        await this.history.flush();
     }
 
     public async sendMessage(
@@ -725,7 +737,7 @@ export class WhatsappService {
         });
 
         this.client.on('message', (message) => {
-            void this.forwardMessage(message).catch((err) =>
+            void this.handleLiveMessage(message).catch((err) =>
                 logger.warn('Live message forward failed; reconcile will retry.', err),
             );
         });
@@ -1309,7 +1321,7 @@ export class WhatsappService {
             !this.reconciling &&
             !this.reinitializing &&
             this.status === 'ready' &&
-            this.cursor >= 0 &&
+            this.history.isLoaded &&
             Date.now() >= this.reconcileBackoffUntil
         );
     }
@@ -1565,62 +1577,158 @@ export class WhatsappService {
         }) as unknown as Promise<ChatDescriptor[]>;
     }
 
+    /**
+     * One pass over every chat: forwards what is newer than the chat's anchor and not yet in the
+     * history, then moves the anchor up to the newest message the chat is now complete through.
+     *
+     * The pass that runs on `ready` is the restart backfill — each chat is scrolled back to its
+     * anchor (see {@link fetchBackTo}) — and the timed passes after it are the safety net for
+     * live events the session dropped. Both are the same walk.
+     */
     private async reconcile(): Promise<void> {
         if (!this.canReconcile()) return;
 
         this.reconciling = true;
-        const scanFrom = Math.max(0, this.cursor - config.whatsapp.reconcileLookbackSec);
-        let maxConfirmed = this.cursor;
+        const passStartedAt = nowSec();
+        const floor = this.historyFloor();
         let allConfirmed = true;
         let published = 0;
         try {
             for (const chat of await this.listChats()) {
-                if (toSeconds(chat.timestamp) < scanFrom && chat.unreadCount <= 0) continue;
-
-                let messages: Message[];
-                try {
-                    messages = await chat.fetchMessages({limit: config.whatsapp.catchUpLimitPerChat});
-                } catch (err) {
-                    if (this.isTransientFrameError(err)) throw err;
-                    logger.warn('Reconcile: failed to fetch messages for chat', {
-                        chatId: chat.id?._serialized,
-                        err,
-                    });
-                    allConfirmed = false;
-                    continue;
-                }
-
-                for (const message of messages) {
-                    const timestamp = toSeconds(message.timestamp);
-                    if (message.fromMe || timestamp < scanFrom) continue;
-
-                    if (await this.forwardMessage(message)) {
-                        published += 1;
-                        maxConfirmed = Math.max(maxConfirmed, timestamp);
-                    } else {
-                        allConfirmed = false;
-                    }
-                }
+                const outcome = await this.reconcileChat(chat, floor);
+                published += outcome.published;
+                allConfirmed &&= outcome.confirmed;
             }
 
-            if (allConfirmed && maxConfirmed > this.cursor) {
-                this.cursor = maxConfirmed;
-                await this.saveCursor();
+            if (allConfirmed) {
+                this.history.advanceWatermark(passStartedAt);
             }
             this.reconcileFailures = 0;
             this.reconcileRestarts = 0;
             this.reconcileBackoffUntil = 0;
             if (published > 0) {
-                logger.info('Reconcile pass complete', {
-                    published,
-                    cursor: this.cursor,
-                    fullyConfirmed: allConfirmed,
-                });
+                logger.info('Reconcile pass complete', {published, fullyConfirmed: allConfirmed});
             }
         } catch (err) {
             this.handleReconcileFailure(err);
         } finally {
             this.reconciling = false;
+        }
+    }
+
+    private async reconcileChat(chat: Chat, floor: number): Promise<{published: number; confirmed: boolean}> {
+        const chatId = chat.id?._serialized;
+        const anchor = this.history.anchorOf(chatId);
+        // A chat with no anchor has never been confirmed on its own; the watermark says up to
+        // when every chat was, which is as far back as it can owe anything.
+        const scanFrom = anchor
+            ? Math.max(floor, anchor.timestamp - config.whatsapp.reconcileLookbackSec)
+            : Math.max(floor, config.history.backfillOnStart ? (this.history.watermark ?? 0) : 0);
+
+        if (chat.unreadCount <= 0) {
+            if (anchor && chat.lastMessage && messageIdOf(chat.lastMessage) === anchor.id) {
+                return {published: 0, confirmed: true};
+            }
+            if (toSeconds(chat.timestamp) < scanFrom) {
+                return {published: 0, confirmed: true};
+            }
+        }
+
+        let messages: Message[];
+        try {
+            messages = await this.fetchBackTo(chat, anchor?.id, scanFrom);
+        } catch (err) {
+            if (this.isTransientFrameError(err)) throw err;
+            logger.warn('Reconcile: failed to fetch messages for chat', {chatId, err});
+            return {published: 0, confirmed: false};
+        }
+
+        let published = 0;
+        let gap = false;
+        let completeThrough: Message | undefined;
+        for (const message of messages) {
+            if (this.isDue(message, scanFrom)) {
+                const result = await this.forwardMessage(message);
+                if (result === 'published') {
+                    published += 1;
+                } else if (result === 'unconfirmed') {
+                    gap = true;
+                }
+            }
+            // The anchor stops short of the first message still owed, so a restart before the
+            // retry lands scrolls back far enough to find it.
+            if (!gap) {
+                completeThrough = message;
+            }
+        }
+
+        const throughId = completeThrough && messageIdOf(completeThrough);
+        if (completeThrough && throughId) {
+            this.history.advanceAnchor(chatId, {
+                id: throughId,
+                timestamp: toSeconds(completeThrough.timestamp),
+            });
+        }
+
+        return {published, confirmed: !gap};
+    }
+
+    /**
+     * The chat's recent messages, oldest first, reaching back to the anchor.
+     *
+     * `fetchMessages` returns the newest `limit` messages, loading earlier ones from the phone
+     * as needed, so the batch is doubled until it holds the anchor, crosses `scanFrom` (the
+     * backfill window ends there), or the chat has no older history. A chat that would need
+     * more than the per-chat ceiling is scanned that far and no further.
+     */
+    private async fetchBackTo(chat: Chat, anchorId: string | undefined, scanFrom: number): Promise<Message[]> {
+        const ceiling = Math.max(1, config.whatsapp.catchUpLimitPerChat, config.history.backfillMaxMessagesPerChat);
+        let limit = Math.min(ceiling, Math.max(1, config.whatsapp.catchUpLimitPerChat));
+
+        for (;;) {
+            const messages = await chat.fetchMessages({limit});
+            const reachedAnchor =
+                anchorId !== undefined && messages.some((message) => messageIdOf(message) === anchorId);
+            const reachedFloor = messages.length > 0 && toSeconds(messages[0].timestamp) < scanFrom;
+            const exhausted = messages.length < limit;
+
+            if (reachedAnchor || reachedFloor || exhausted) {
+                return messages;
+            }
+            if (limit >= ceiling) {
+                logger.warn('Reconcile: chat scrolled to the per-chat ceiling without reaching its anchor.', {
+                    chatId: chat.id?._serialized,
+                    limit,
+                    oldestScanned: toSeconds(messages[0]?.timestamp),
+                    scanFrom,
+                });
+                return messages;
+            }
+            limit = Math.min(ceiling, limit * 2);
+        }
+    }
+
+    /**
+     * The oldest timestamp any message may have and still be forwarded: never past the backfill
+     * window, and with backfill off never from before this process started.
+     */
+    private historyFloor(): number {
+        const window = nowSec() - config.history.backfillMaxAgeSec;
+        return config.history.backfillOnStart ? window : Math.max(window, this.startedAtSec);
+    }
+
+    /** Whether a message still has to be forwarded: someone else's, recent enough, not yet sent. */
+    private isDue(message: Message, scanFrom: number): boolean {
+        if (message.fromMe || toSeconds(message.timestamp) < scanFrom) {
+            return false;
+        }
+        const messageId = messageIdOf(message);
+        return !messageId || !this.history.has(message.from, messageId);
+    }
+
+    private async handleLiveMessage(message: Message): Promise<void> {
+        if (this.isDue(message, this.historyFloor())) {
+            await this.forwardMessage(message);
         }
     }
 
@@ -1683,7 +1791,7 @@ export class WhatsappService {
         };
     }
 
-    private async forwardMessage(message: Message): Promise<boolean> {
+    private async forwardMessage(message: Message): Promise<PublishResult> {
         const chatId = message.from;
         const messageId = messageIdOf(message);
         const result = await this.publisher.publishMessage(
@@ -1694,41 +1802,15 @@ export class WhatsappService {
 
         if (result === 'published') {
             logger.info('Message forwarded', {chatId, messageId, hasMedia: message.hasMedia});
+            if (messageId) {
+                this.history.record(chatId, {id: messageId, timestamp: toSeconds(message.timestamp)});
+            }
         }
 
-        // 'filtered' counts as confirmed: the message was never meant to leave, so the cursor
+        // 'filtered' counts as confirmed: the message was never meant to leave, so the anchor
         // moves past it. It is not logged as forwarded — that read as a contradiction next to
         // the allowlist skip line it always follows.
-        return result !== 'unconfirmed';
-    }
-
-    private async loadCursor(): Promise<void> {
-        if (this.cursor >= 0) return;
-        try {
-            const raw = await readFile(this.cursorPath, 'utf8');
-            const parsed = JSON.parse(raw) as {cursor?: unknown};
-            if (typeof parsed.cursor === 'number' && Number.isFinite(parsed.cursor)) {
-                this.cursor = parsed.cursor;
-                logger.info('Loaded delivery cursor', {cursor: this.cursor});
-                return;
-            }
-        } catch {
-            // no persisted cursor yet
-        }
-        this.cursor = Math.floor(Date.now() / 1000);
-        await this.saveCursor();
-        logger.info('Initialized delivery cursor at current time', {cursor: this.cursor});
-    }
-
-    private async saveCursor(): Promise<void> {
-        try {
-            await mkdir(dirname(this.cursorPath), {recursive: true});
-            const tmp = `${this.cursorPath}.tmp`;
-            await writeFile(tmp, JSON.stringify({cursor: this.cursor}), 'utf8');
-            await rename(tmp, this.cursorPath);
-        } catch (err) {
-            logger.warn('Failed to persist delivery cursor', err);
-        }
+        return result;
     }
 
     private async saveQrImage(qr: string): Promise<void> {
