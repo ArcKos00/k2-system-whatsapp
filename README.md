@@ -14,6 +14,9 @@ documented with **Swagger UI**, and DI via **tsyringe**.
 - `GET /chats` — list every chat with its id and the fullest description WhatsApp will give.
 - `GET /health` — liveness/readiness (unauthenticated).
 - `GET /qr` — login QR as a PNG while authentication is pending (404 once linked).
+- `GET /session` — session state; `POST /session/login` — start a session and wait for its QR;
+  `POST /session/logout` — unlink the device and drop the local session (stays logged out until
+  the next login); `GET /session/qr` — 302 redirect to `/qr` while a QR is pending.
 - `GET /docs` — Swagger UI; `GET /openapi.json` — raw spec.
 - WhatsApp session persisted via `LocalAuth` (QR printed to console on first run).
 - Per-message throttle to reduce ban risk.
@@ -339,6 +342,22 @@ the last process stopped, and the history is what keeps a rescan from publishing
 - Either way nothing older than `WHATSAPP_BACKFILL_MAX_AGE_SEC` (2 days) is ever forwarded. On a
   first start with backfill on and no history at all, that means the last 2 days of every
   forwarded chat.
+
+### Message events
+
+Every publish carries an `event` — in the JSON body and as an AMQP header of the same name — so a
+consumer can tell what happened to the message (or bind only to the events it handles):
+
+| `event`   | When                                   | Extra fields                                  | AMQP `messageId`          |
+|-----------|----------------------------------------|-----------------------------------------------|---------------------------|
+| `created` | a new inbound message (live or backfill) | —                                           | `<id>`                    |
+| `edited`  | the sender edited a message            | `body` (new text), `previousBody`, `editedAt` | `<id>:edited:<editedAtMs>` |
+| `deleted` | the sender deleted it for everyone     | `body`/`type` of the original if known, `deletedAt` | `<id>:deleted`      |
+
+`id` is always the original message's id, so `edited`/`deleted` refer back to the `created` one.
+Edits and deletions are forwarded live only: reconcile cannot see that an old message changed, so
+one that arrives while RabbitMQ is unavailable is logged and not retried. Messages deleted before
+they were ever forwarded are skipped by reconcile.
 
 ### Reconcile back-off
 

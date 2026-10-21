@@ -13,6 +13,16 @@ type AmqpChannel = Awaited<ReturnType<AmqpConnection['createConfirmChannel']>>;
  */
 export type PublishResult = 'published' | 'filtered' | 'unconfirmed';
 
+/**
+ * What happened to the message a publish is about. Carried both in the body (`event`) and as
+ * an AMQP header of the same name, so a consumer can bind to just the events it handles.
+ *
+ * - `created` — a new inbound message (also what a reconcile/backfill pass forwards);
+ * - `edited` — the sender changed the text of a message already in the chat;
+ * - `deleted` — the sender deleted a message for everyone.
+ */
+export type MessageEventType = 'created' | 'edited' | 'deleted';
+
 @singleton()
 export class RabbitMqPublisher {
     private connection: AmqpConnection | null = null;
@@ -34,14 +44,19 @@ export class RabbitMqPublisher {
         await this.connect();
     }
 
-    public publishMessage(chatId: string, payload: unknown, messageId?: string): Promise<PublishResult> {
+    public publishMessage(
+        chatId: string,
+        payload: unknown,
+        messageId?: string,
+        event: MessageEventType = 'created',
+    ): Promise<PublishResult> {
         if (!this.isEnabled) {
             return Promise.resolve('unconfirmed');
         }
         // Allowlist-filtered messages are intentionally not forwarded; report them as settled
         // so the cursor advances past them (they are not "lost").
         if (!this.isAllowed(chatId)) {
-            logger.debug('Skipping message: chat not in forward allowlist.', { chatId });
+            logger.debug('Skipping message: chat not in forward allowlist.', { chatId, event });
             return Promise.resolve('filtered');
         }
         const channel = this.channel;
@@ -57,14 +72,14 @@ export class RabbitMqPublisher {
                     '',
                     Buffer.from(JSON.stringify(payload)),
                     {
-                        headers: { chatId },
+                        headers: { chatId, event },
                         contentType: 'application/json',
                         persistent: true,
                         messageId,
                     },
                     (err) => {
                         if (err) {
-                            logger.warn('RabbitMQ nacked publish; will retry via reconcile.', { chatId, err });
+                            logger.warn('RabbitMQ nacked publish.', { chatId, event, err });
                         }
                         resolve(err ? 'unconfirmed' : 'published');
                     },

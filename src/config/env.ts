@@ -79,6 +79,11 @@ export const config = {
     cursorPath: process.env.WHATSAPP_CURSOR_PATH || undefined,
     initMaxAttempts: num('WHATSAPP_INIT_MAX_ATTEMPTS', 3),
     initTimeoutMs: num('WHATSAPP_INIT_TIMEOUT_MS', 90000),
+    /**
+     * How long `POST /session/login` waits for the session to show a QR (or come up ready)
+     * before answering with whatever state it is in. The QR stays at `GET /qr` either way.
+     */
+    loginWaitMs: num('WHATSAPP_LOGIN_WAIT_MS', 60000),
     webVersion: process.env.WHATSAPP_WEB_VERSION || undefined,
     webVersionRemotePath: process.env.WHATSAPP_WEB_VERSION_REMOTE_PATH || undefined,
     /**

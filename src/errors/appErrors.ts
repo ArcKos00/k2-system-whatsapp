@@ -82,3 +82,14 @@ export class ChatNotFoundError extends AppError {
     super(`Chat is not available to the linked WhatsApp account: ${chatId}`, 404, 'WA_CHAT_NOT_FOUND');
   }
 }
+
+/** `GET /session/qr` was asked for a QR while the session is not showing one. */
+export class QrNotAvailableError extends AppError {
+  constructor(status: string) {
+    super(
+      `No QR pending (WhatsApp status: ${status}). Call POST /session/login to start a session.`,
+      404,
+      'QR_NOT_AVAILABLE',
+    );
+  }
+}

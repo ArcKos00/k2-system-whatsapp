@@ -10,7 +10,7 @@ import {config} from '../config/env';
 import {logger} from '../utils/logger';
 import {canSendInline, resolveMimetype, verifiedMimetype} from '../utils/mediaKind';
 import {RabbitMqPublisher} from './rabbitMqPublisher';
-import type {PublishResult} from './rabbitMqPublisher';
+import type {MessageEventType, PublishResult} from './rabbitMqPublisher';
 import {ProcessedMessageStore} from './processedMessageStore';
 import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
@@ -22,6 +22,7 @@ import {
     NumberNotFoundError,
     WhatsAppNotReadyError,
 } from '../errors/appErrors';
+import type {LogoutResponse, SessionStateResponse} from '../dtos/session.dto';
 
 export interface MediaAttachment {
     path?: string;
@@ -38,7 +39,11 @@ export interface SendResult {
     sentMessages: number;
 }
 
-export type WhatsAppStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected';
+/**
+ * `logged_out` is the one state the service never leaves on its own: it follows an explicit
+ * `POST /session/logout`, and only `POST /session/login` starts a session again.
+ */
+export type WhatsAppStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected' | 'logged_out';
 
 /**
  * Everything WhatsApp's own in-page chat model knows about one chat, read straight out of the
@@ -221,6 +226,12 @@ export class WhatsappService {
     private lastSentAt = 0;
 
     private reinitializing = false;
+    /** Set by an explicit logout; keeps recovery, the heartbeat and the watchdog from relinking. */
+    private loggedOut = false;
+    /** The `client.initialize()` currently in flight, from startup, a login or a recovery. */
+    private starting: Promise<void> | null = null;
+    /** Login and logout run one at a time, in the order they were asked for. */
+    private sessionOp: Promise<unknown> = Promise.resolve();
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private readyWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -277,8 +288,16 @@ export class WhatsappService {
         await this.ensurePinnedBuild();
         this.armReadyWatchdog();
 
+        await this.track(this.initializeWithRetries());
+    }
+
+    /** Runs `client.initialize()`, destroying and retrying the client on failure. */
+    private async initializeWithRetries(): Promise<void> {
         const maxAttempts = Math.max(1, config.whatsapp.initMaxAttempts);
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (this.loggedOut) {
+                return;
+            }
             try {
                 logger.info('Initializing WhatsApp client...', {
                     clientId: config.whatsapp.clientId,
@@ -305,6 +324,144 @@ export class WhatsappService {
                 }
                 await sleep(config.whatsapp.frameRetryDelayMs * attempt);
             }
+        }
+    }
+
+    /** Remembers an initialize as the one in flight until it settles, so logout can wait for it. */
+    private async track(start: Promise<void>): Promise<void> {
+        this.starting = start;
+        try {
+            await start;
+        } finally {
+            if (this.starting === start) {
+                this.starting = null;
+            }
+        }
+    }
+
+    public getSessionState(): SessionStateResponse {
+        const qrPending = this.currentQr !== null;
+        return {
+            status: this.status,
+            qrPending,
+            qrUrl: qrPending ? `${config.pathBase}/qr` : undefined,
+        };
+    }
+
+    /**
+     * Starts a session if none is running and waits (up to `WHATSAPP_LOGIN_WAIT_MS`) until it
+     * either shows a QR to scan or is ready. A session already linked is left alone.
+     */
+    public login(): Promise<SessionStateResponse> {
+        return this.exclusive(async () => {
+            const idle =
+                this.loggedOut ||
+                (this.status === 'disconnected' && !this.reinitializing && this.starting === null);
+
+            if (idle) {
+                logger.info('Login requested; starting the WhatsApp session.', {status: this.status});
+                this.loggedOut = false;
+                this.status = 'initializing';
+                this.startHeartbeat();
+                this.armReadyWatchdog();
+                void this.track(this.initializeWithRetries()).catch((err) => {
+                    this.status = 'disconnected';
+                    logger.error('WhatsApp client failed to initialize after login', err);
+                });
+            }
+
+            await this.waitForQrOrReady(config.whatsapp.loginWaitMs);
+            return this.getSessionState();
+        });
+    }
+
+    /**
+     * Unlinks this device from the WhatsApp account and deletes the local session, so the next
+     * login asks for a fresh QR (which can be scanned by a different phone). The service then
+     * stays logged out — no recovery, no restart — until `login()` is called.
+     */
+    public logout(): Promise<LogoutResponse> {
+        return this.exclusive(async () => {
+            if (this.loggedOut) {
+                return {...this.getSessionState(), deviceUnlinked: false};
+            }
+
+            logger.info('Logout requested.', {status: this.status});
+            this.loggedOut = true;
+            this.stopTimers();
+
+            // An initialize still in flight would bring the browser back after we close it.
+            const pending = this.starting;
+            if (pending) {
+                await this.withTimeout(
+                    pending.catch(() => undefined),
+                    config.whatsapp.initTimeoutMs,
+                    'pending initialize',
+                ).catch((err) => logger.warn('Logout: gave up waiting for a pending initialize', err));
+            }
+
+            let deviceUnlinked = false;
+            if (this.status === 'ready' || this.status === 'authenticated') {
+                try {
+                    await this.withTimeout(this.client.logout(), 30000, 'client.logout');
+                    deviceUnlinked = true;
+                } catch (err) {
+                    logger.warn('Logout: WhatsApp did not confirm the unlink; dropping the local session anyway.', err);
+                }
+            }
+
+            try {
+                await this.client.destroy();
+            } catch (err) {
+                logger.debug('Logout: client.destroy after logout', err);
+            }
+            this.stopTimers();
+            await this.removeLocalSession();
+
+            this.status = 'logged_out';
+            this.currentQr = null;
+            await this.removeQrImage();
+            await this.history.flush();
+
+            logger.info('WhatsApp logged out.', {deviceUnlinked});
+            return {...this.getSessionState(), deviceUnlinked};
+        });
+    }
+
+    private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+        const run = this.sessionOp.then(operation, operation);
+        this.sessionOp = run.catch(() => undefined);
+        return run;
+    }
+
+    private stopTimers(): void {
+        this.stopHeartbeat();
+        this.stopReconcile();
+        this.clearReadyWatchdog();
+    }
+
+    /** Polls until a QR is up, the session is ready, or the start has visibly failed. */
+    private async waitForQrOrReady(timeoutMs: number): Promise<void> {
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        while (Date.now() < deadline) {
+            if (this.currentQr !== null || this.status === 'ready' || this.status === 'logged_out') {
+                return;
+            }
+            const failed = this.status === 'disconnected' && !this.reinitializing && this.starting === null;
+            if (failed) {
+                return;
+            }
+            await sleep(250);
+        }
+    }
+
+    /** LocalAuth keeps the linked session in `<dataPath>/session-<clientId>`. */
+    private async removeLocalSession(): Promise<void> {
+        const sessionDir = join(config.whatsapp.sessionPath, `session-${config.whatsapp.clientId}`);
+        try {
+            await rm(sessionDir, {recursive: true, force: true, maxRetries: 3});
+        } catch (err) {
+            logger.warn(`Logout: could not remove the session directory ${sessionDir}`, err);
         }
     }
 
@@ -695,6 +852,9 @@ export class WhatsappService {
 
     private registerEventHandlers(): void {
         this.client.on('qr', (qr) => {
+            if (this.loggedOut) {
+                return;
+            }
             this.status = 'qr';
             this.currentQr = qr;
             this.clearReadyWatchdog();
@@ -704,6 +864,9 @@ export class WhatsappService {
         });
 
         this.client.on('authenticated', () => {
+            if (this.loggedOut) {
+                return;
+            }
             this.status = 'authenticated';
             this.currentQr = null;
             logger.info('WhatsApp authenticated; session persisted.');
@@ -717,6 +880,9 @@ export class WhatsappService {
         });
 
         this.client.on('ready', () => {
+            if (this.loggedOut) {
+                return;
+            }
             this.status = 'ready';
             this.currentQr = null;
             this.clearReadyWatchdog();
@@ -731,6 +897,10 @@ export class WhatsappService {
         });
 
         this.client.on('disconnected', (reason) => {
+            if (this.loggedOut) {
+                logger.info('WhatsApp client disconnected after logout', reason);
+                return;
+            }
             this.status = 'disconnected';
             logger.error('WhatsApp client disconnected', reason);
             void this.recoverFromFrameError(new Error(`disconnected: ${String(reason)}`));
@@ -739,6 +909,18 @@ export class WhatsappService {
         this.client.on('message', (message) => {
             void this.handleLiveMessage(message).catch((err) =>
                 logger.warn('Live message forward failed; reconcile will retry.', err),
+            );
+        });
+
+        this.client.on('message_edit', (message, newBody, prevBody) => {
+            void this.forwardEdit(message, String(newBody ?? ''), String(prevBody ?? '')).catch((err) =>
+                logger.warn('Message edit forward failed', err),
+            );
+        });
+
+        this.client.on('message_revoke_everyone', (message, revoked) => {
+            void this.forwardDeletion(message, revoked ?? undefined).catch((err) =>
+                logger.warn('Message deletion forward failed', err),
             );
         });
     }
@@ -768,7 +950,7 @@ export class WhatsappService {
         this.clearReadyWatchdog();
         this.readyWatchdogTimer = setTimeout(() => {
             this.readyWatchdogTimer = null;
-            if (this.status === 'ready' || this.status === 'qr' || this.reinitializing) {
+            if (this.status === 'ready' || this.status === 'qr' || this.reinitializing || this.loggedOut) {
                 return;
             }
             logger.warn('Watchdog: client never became ready; restarting session.', {
@@ -790,7 +972,7 @@ export class WhatsappService {
     }
 
     private async checkHealth(): Promise<void> {
-        if (this.reinitializing || this.status === 'qr') {
+        if (this.reinitializing || this.loggedOut || this.status === 'qr') {
             return;
         }
         const ready = this.status === 'ready';
@@ -1719,7 +1901,9 @@ export class WhatsappService {
 
     /** Whether a message still has to be forwarded: someone else's, recent enough, not yet sent. */
     private isDue(message: Message, scanFrom: number): boolean {
-        if (message.fromMe || toSeconds(message.timestamp) < scanFrom) {
+        // A message deleted before it was ever forwarded has nothing left to forward; its
+        // `deleted` event (if it arrives live) is enough for the consumer.
+        if (message.fromMe || message.type === 'revoked' || toSeconds(message.timestamp) < scanFrom) {
             return false;
         }
         const messageId = messageIdOf(message);
@@ -1778,8 +1962,9 @@ export class WhatsappService {
         return Math.min(base * 2 ** this.reconcileRestarts, ceiling);
     }
 
-    private buildPayload(message: Message): Record<string, unknown> {
+    private buildPayload(message: Message, event: MessageEventType): Record<string, unknown> {
         return {
+            event,
             id: messageIdOf(message),
             chatId: message.from,
             from: message.from,
@@ -1796,8 +1981,9 @@ export class WhatsappService {
         const messageId = messageIdOf(message);
         const result = await this.publisher.publishMessage(
             chatId,
-            this.buildPayload(message),
+            this.buildPayload(message, 'created'),
             messageId,
+            'created',
         );
 
         if (result === 'published') {
@@ -1811,6 +1997,80 @@ export class WhatsappService {
         // moves past it. It is not logged as forwarded — that read as a contradiction next to
         // the allowlist skip line it always follows.
         return result;
+    }
+
+    /**
+     * Publishes an `edited` event: the message as it is now, with the text it replaced.
+     *
+     * Edits and deletions are forwarded live only — reconcile cannot tell that an old message
+     * changed — so one that arrives while RabbitMQ is down is logged and not retried.
+     */
+    private async forwardEdit(message: Message, newBody: string, previousBody: string): Promise<void> {
+        if (message.fromMe) {
+            return;
+        }
+        const chatId = message.from;
+        const messageId = messageIdOf(message);
+        const editedAtMs = toSeconds(message.latestEditSenderTimestampMs) || Date.now();
+        const payload = {
+            ...this.buildPayload(message, 'edited'),
+            body: newBody,
+            previousBody,
+            editedAt: Math.floor(editedAtMs / 1000),
+        };
+        const result = await this.publisher.publishMessage(
+            chatId,
+            payload,
+            messageId ? `${messageId}:edited:${editedAtMs}` : undefined,
+            'edited',
+        );
+        this.logEventResult(result, 'edited', chatId, messageId);
+    }
+
+    /**
+     * Publishes a `deleted` event for a message deleted for everyone. `original` is the message
+     * as it was before the deletion when the library caught it; its body and type are passed on
+     * so the consumer can tell what was removed even if it never saw the message itself.
+     */
+    private async forwardDeletion(message: Message, original: Message | undefined): Promise<void> {
+        if (message.fromMe) {
+            return;
+        }
+        const chatId = message.from;
+        const messageId = messageIdOf(message) ?? (original && messageIdOf(original));
+        const payload = {
+            ...this.buildPayload(message, 'deleted'),
+            id: messageId,
+            author: message.author ?? original?.author,
+            body: original?.body,
+            type: original?.type,
+            timestamp: original?.timestamp ?? message.timestamp,
+            hasMedia: original?.hasMedia ?? false,
+            deletedAt: nowSec(),
+        };
+        const result = await this.publisher.publishMessage(
+            chatId,
+            payload,
+            messageId ? `${messageId}:deleted` : undefined,
+            'deleted',
+        );
+        this.logEventResult(result, 'deleted', chatId, messageId);
+    }
+
+    private logEventResult(
+        result: PublishResult,
+        event: MessageEventType,
+        chatId: string,
+        messageId: string | undefined,
+    ): void {
+        if (result === 'published') {
+            logger.info(`Message ${event} event forwarded`, {chatId, messageId});
+        } else if (result === 'unconfirmed') {
+            logger.warn(`Message ${event} event not confirmed by RabbitMQ; it will not be retried.`, {
+                chatId,
+                messageId,
+            });
+        }
     }
 
     private async saveQrImage(qr: string): Promise<void> {
@@ -2243,11 +2503,18 @@ export class WhatsappService {
     }
 
     private async recoverFromFrameError(err: unknown): Promise<void> {
+        if (this.loggedOut) {
+            return;
+        }
         this.status = 'disconnected';
         if (this.reinitializing) {
             return;
         }
         this.reinitializing = true;
+        await this.track(this.runRecovery(err));
+    }
+
+    private async runRecovery(err: unknown): Promise<void> {
         logger.warn('Recovering WhatsApp client after frame/session loss...', err);
         try {
             try {
