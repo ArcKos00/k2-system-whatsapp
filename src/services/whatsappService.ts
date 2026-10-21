@@ -498,7 +498,10 @@ export class WhatsappService {
 
         this.clearReadyWatchdog();
         try {
-            await this.client.destroy();
+            // Browser.close over CDP is Chromium's clean shutdown: it writes the profile out
+            // before exiting. Bounded so a hung browser cannot eat the pod's grace period.
+            await this.withTimeout(this.client.destroy(), 30000, 'client.destroy');
+            logger.info('WhatsApp browser closed cleanly.');
         } catch (err) {
             logger.warn('Error while destroying WhatsApp client', err);
         }
@@ -843,7 +846,18 @@ export class WhatsappService {
     }
 
     private buildClientOptions(): ClientOptions {
-        const puppeteer: LaunchOptions = {headless: true, args: puppeteerArgs()};
+        const puppeteer: LaunchOptions = {
+            headless: true,
+            args: puppeteerArgs(),
+            // Puppeteer's own signal handlers SIGKILL the whole browser process group the moment
+            // the pod gets SIGTERM, racing our shutdown. Chromium then dies without flushing
+            // WhatsApp's IndexedDB/localStorage, and the next start finds a session WhatsApp Web
+            // rejects as a database error (logout_reason=0, CLIENT_FATAL) — every restart cost a
+            // relink. The browser is closed by `destroy()` from our own shutdown instead.
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false,
+        };
 
         if (config.whatsapp.puppeteerExecutablePath) {
             puppeteer.executablePath = config.whatsapp.puppeteerExecutablePath;
