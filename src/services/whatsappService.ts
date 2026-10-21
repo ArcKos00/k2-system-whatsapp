@@ -211,8 +211,32 @@ const messageIdOf = (message: Message): string | undefined => {
         return id;
     }
 
-    const serialized = (id as {_serialized?: unknown} | undefined)?._serialized;
-    return typeof serialized === 'string' ? serialized : undefined;
+    const key = id as {_serialized?: unknown; fromMe?: unknown; remote?: unknown; id?: unknown; participant?: unknown} | undefined;
+    if (typeof key?._serialized === 'string') {
+        return key._serialized;
+    }
+
+    // The library copies the key into a plain object (`Object.assign({}, msg.id, …)`), which
+    // drops the `_serialized` getter we put on MsgKey's prototype. Rebuild it from the parts, in
+    // the same "<fromMe>_<remote>_<id>[_<participant>]" form MsgKey.toString() gives.
+    const remote = widOf(key?.remote);
+    if (typeof key?.fromMe !== 'boolean' || !remote || typeof key.id !== 'string') {
+        return undefined;
+    }
+    const participant = widOf(key.participant);
+    return `${key.fromMe}_${remote}_${key.id}${participant ? `_${participant}` : ''}`;
+};
+
+/** A WhatsApp id given as a string, a `{_serialized}` object or a bare `{user, server}` wid. */
+const widOf = (value: unknown): string | undefined => {
+    if (typeof value === 'string') {
+        return value || undefined;
+    }
+    const wid = value as {_serialized?: unknown; user?: unknown; server?: unknown} | undefined;
+    if (typeof wid?._serialized === 'string') {
+        return wid._serialized;
+    }
+    return typeof wid?.user === 'string' && typeof wid.server === 'string' ? `${wid.user}@${wid.server}` : undefined;
 };
 
 @singleton()
@@ -2006,7 +2030,13 @@ export class WhatsappService {
      * changed — so one that arrives while RabbitMQ is down is logged and not retried.
      */
     private async forwardEdit(message: Message, newBody: string, previousBody: string): Promise<void> {
-        if (message.fromMe) {
+        if (message.fromMe || newBody === previousBody) {
+            return;
+        }
+        // The library fires `message_edit` on any change of `body`, including WhatsApp filling it
+        // in on a message that has only just arrived. Only a real edit carries the edit markers.
+        if (!message.latestEditMsgKey && !message.latestEditSenderTimestampMs) {
+            logger.debug('Ignoring a body change that is not an edit', {chatId: message.from});
             return;
         }
         const chatId = message.from;
