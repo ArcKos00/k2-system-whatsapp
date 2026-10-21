@@ -17,6 +17,9 @@ documented with **Swagger UI**, and DI via **tsyringe**.
 - `GET /session` — session state; `POST /session/login` — start a session and wait for its QR;
   `POST /session/logout` — unlink the device and drop the local session (stays logged out until
   the next login); `GET /session/qr` — 302 redirect to `/qr` while a QR is pending.
+- The HTTP server, Swagger and the session endpoints come up without a logged-in WhatsApp (and
+  without RabbitMQ). Endpoints that need a session answer `503` with `WA_NOT_LOGGED_IN` (no
+  account linked: log in) or `WA_NOT_READY` (linked, still connecting).
 - `GET /docs` — Swagger UI; `GET /openapi.json` — raw spec.
 - WhatsApp session persisted via `LocalAuth` (QR printed to console on first run).
 - Per-message throttle to reduce ban risk.
