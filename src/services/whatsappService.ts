@@ -12,6 +12,7 @@ import {canSendInline, resolveMimetype, verifiedMimetype} from '../utils/mediaKi
 import {RabbitMqPublisher} from './rabbitMqPublisher';
 import type {MessageEventType, PublishResult} from './rabbitMqPublisher';
 import {ProcessedMessageStore} from './processedMessageStore';
+import {PageDiagnostics} from './pageDiagnostics';
 import type {ChatKind, ChatListResponse, ChatNameSource, ChatSummaryDto} from '../dtos/chat.dto';
 import {
     AppError,
@@ -250,6 +251,8 @@ export class WhatsappService {
     private lastSentAt = 0;
 
     private reinitializing = false;
+    /** Watches the browser page for the reloads and logouts the library reports only as `LOGOUT`. */
+    private readonly diagnostics = new PageDiagnostics();
     /** Set by an explicit logout; keeps recovery, the heartbeat and the watchdog from relinking. */
     private loggedOut = false;
     /** The `client.initialize()` currently in flight, from startup, a login or a recovery. */
@@ -876,6 +879,7 @@ export class WhatsappService {
 
     private registerEventHandlers(): void {
         this.client.on('qr', (qr) => {
+            void this.diagnostics.instrument(this.client.pupPage);
             if (this.loggedOut) {
                 return;
             }
@@ -888,6 +892,7 @@ export class WhatsappService {
         });
 
         this.client.on('authenticated', () => {
+            void this.diagnostics.instrument(this.client.pupPage);
             if (this.loggedOut) {
                 return;
             }
@@ -904,9 +909,11 @@ export class WhatsappService {
         });
 
         this.client.on('ready', () => {
+            void this.diagnostics.instrument(this.client.pupPage);
             if (this.loggedOut) {
                 return;
             }
+            this.diagnostics.markReady();
             this.status = 'ready';
             this.currentQr = null;
             this.clearReadyWatchdog();
@@ -921,6 +928,7 @@ export class WhatsappService {
         });
 
         this.client.on('disconnected', (reason) => {
+            this.diagnostics.dump(`disconnected: ${String(reason)}`);
             if (this.loggedOut) {
                 logger.info('WhatsApp client disconnected after logout', reason);
                 return;
@@ -934,6 +942,10 @@ export class WhatsappService {
             void this.handleLiveMessage(message).catch((err) =>
                 logger.warn('Live message forward failed; reconcile will retry.', err),
             );
+        });
+
+        this.client.on('change_state', (state) => {
+            logger.info('WhatsApp connection state changed', {state});
         });
 
         this.client.on('message_edit', (message, newBody, prevBody) => {
