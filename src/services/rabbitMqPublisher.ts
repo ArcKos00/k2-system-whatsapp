@@ -127,7 +127,9 @@ export class RabbitMqPublisher {
             return;
         }
         try {
-            const connection = await amqp.connect(url);
+            // Without a timeout a broker that drops packets leaves the connect hanging forever,
+            // and no reconnect is ever scheduled.
+            const connection = await amqp.connect(url, { timeout: config.rabbitmq.connectTimeoutMs });
             const channel = await connection.createConfirmChannel();
             await channel.assertExchange(config.rabbitmq.exchange, 'headers', { durable: true });
 

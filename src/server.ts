@@ -12,8 +12,8 @@ async function bootstrap(): Promise<void> {
   const rabbitmq = container.resolve(RabbitMqPublisher);
   const whatsapp = container.resolve(WhatsappService);
 
-  await rabbitmq.init();
-
+  // HTTP first: Swagger, /health and the login endpoints must answer even while RabbitMQ is
+  // unreachable or WhatsApp is not logged in. Endpoints that need a session say so with a 503.
   const app = createApp();
   const base = config.pathBase;
   const server = app.listen(config.port, () => {
@@ -24,6 +24,10 @@ async function bootstrap(): Promise<void> {
     logger.info(`Swagger UI available at http://localhost:${config.port}${base}/docs`);
     logger.info(`Login QR (while pending) at http://localhost:${config.port}${base}/qr`);
   });
+
+  // Not awaited: a broker that does not answer must not hold up the WhatsApp login. Until the
+  // channel is up, publishes report 'unconfirmed' and reconcile delivers them later.
+  void rabbitmq.init();
 
   whatsapp.initClient().catch((err) => {
     logger.error('WhatsApp client failed to initialize', err);

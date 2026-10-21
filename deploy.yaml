@@ -224,13 +224,15 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
-          # /ready (unlike /health) returns 503 whenever the WhatsApp session
-          # cannot send — including 'authenticated', where login succeeded but
-          # WhatsApp Web never finished loading. Keeps the pod out of the
-          # Service while sends would fail with WA_NOT_READY.
+          # Readiness is /health, not /ready: the pod must take traffic while
+          # WhatsApp is logged out, or nobody can reach Swagger, /qr or
+          # /session/login to log it in (single replica, RWO volume — there is
+          # no other pod to fall back to). Endpoints that need a session answer
+          # 503 WA_NOT_LOGGED_IN / WA_NOT_READY on their own; /ready still
+          # reports whether the session can send, for monitoring.
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: http
             periodSeconds: 15
             timeoutSeconds: 5

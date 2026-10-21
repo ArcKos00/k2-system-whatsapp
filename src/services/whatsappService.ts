@@ -529,7 +529,7 @@ export class WhatsappService {
 
     private assertSendable(message: string | undefined, files: MediaAttachment[]): void {
         if (!this.isReady()) {
-            throw new WhatsAppNotReadyError();
+            throw new WhatsAppNotReadyError(this.status);
         }
         if (!message?.trim() && files.length === 0) {
             throw new MessageSendError('Either a message body or at least one file is required.');
@@ -576,7 +576,7 @@ export class WhatsappService {
             if (err instanceof AppError) throw err;
             if (this.isTransientFrameError(err)) {
                 void this.recoverFromFrameError(err);
-                throw new WhatsAppNotReadyError();
+                throw new WhatsAppNotReadyError(this.status);
             }
             throw new MessageSendError(err instanceof Error ? err.message : String(err));
         }
@@ -597,7 +597,7 @@ export class WhatsappService {
      */
     public async listChatSummaries(): Promise<ChatListResponse> {
         if (!this.isReady()) {
-            throw new WhatsAppNotReadyError();
+            throw new WhatsAppNotReadyError(this.status);
         }
 
         const allowlist = config.rabbitmq.chatIds;
@@ -2231,7 +2231,7 @@ export class WhatsappService {
             } catch (retryErr) {
                 if (this.isTransientFrameError(retryErr)) {
                     void this.recoverFromFrameError(retryErr);
-                    throw new WhatsAppNotReadyError();
+                    throw new WhatsAppNotReadyError(this.status);
                 }
                 throw retryErr;
             }

@@ -145,6 +145,7 @@ export const config = {
     url: process.env.RABBITMQ_URL || undefined,
     exchange: process.env.RABBITMQ_EXCHANGE ?? 'whatsapp.messages',
     reconnectDelayMs: num('RABBITMQ_RECONNECT_DELAY_MS', 5000),
+    connectTimeoutMs: num('RABBITMQ_CONNECT_TIMEOUT_MS', 10000),
     chatIds: list('RABBITMQ_CHAT_IDS'),
   },
 } as const;
