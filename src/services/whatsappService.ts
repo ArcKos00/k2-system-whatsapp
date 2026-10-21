@@ -1593,6 +1593,9 @@ export class WhatsappService {
             !this.reconciling &&
             !this.reinitializing &&
             this.status === 'ready' &&
+            // The interval timer outlives a reload; until the new page has settled it must
+            // not touch chats either.
+            this.settled &&
             this.history.isLoaded &&
             Date.now() >= this.reconcileBackoffUntil
         );
