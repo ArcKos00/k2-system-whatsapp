@@ -22,6 +22,14 @@ interface TrailEntry {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function pageScript(binding: string): void {
     const w = globalThis as any;
+    // Only the WhatsApp Web window itself. The script is also injected into WhatsApp's helper
+    // iframes (flows.whatsapp.net/…/cache_management right after a QR scan), where the modules
+    // below do not exist and asking for them makes WhatsApp's ErrorUtils report errors.
+    try {
+        if (w.top !== w || w.location?.hostname !== 'web.whatsapp.com') return;
+    } catch {
+        return;
+    }
     const send = (event: Record<string, unknown>): void => {
         try {
             w[binding]?.(JSON.stringify({...event, url: w.location?.href}));
@@ -45,12 +53,15 @@ function pageScript(binding: string): void {
     let tries = 0;
     const timer = setInterval(() => {
         tries += 1;
-        if (tries > 1200) {
+        if (tries > 600) {
             clearInterval(timer);
             return;
         }
         try {
-            if (typeof w.require !== 'function') return;
+            // Same gate the library uses before it touches any module: until the bundle has set
+            // Debug.VERSION, require() of a module that is not registered yet throws and is
+            // logged by WhatsApp itself.
+            if (typeof w.require !== 'function' || w.Debug?.VERSION === undefined) return;
             const Socket = w.require('WAWebSocketModel')?.Socket;
             const Cmd = w.require('WAWebCmd')?.Cmd;
             if (!Socket || !Cmd) return;
@@ -76,7 +87,7 @@ function pageScript(binding: string): void {
             send({kind: 'hook-failed', error: String((err as any)?.message ?? err)});
             clearInterval(timer);
         }
-    }, 100);
+    }, 500);
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
