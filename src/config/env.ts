@@ -84,6 +84,12 @@ export const config = {
      * before answering with whatever state it is in. The QR stays at `GET /qr` either way.
      */
     loginWaitMs: num('WHATSAPP_LOGIN_WAIT_MS', 60000),
+    /**
+     * How long after `ready` reconcile and the media-prep probe wait before they touch chats.
+     * WhatsApp Web keeps loading after the library reports ready, and opening chats in that
+     * window got the device logged out (CLIENT_FATAL).
+     */
+    postReadyDelayMs: num('WHATSAPP_POST_READY_DELAY_MS', 20000),
     webVersion: process.env.WHATSAPP_WEB_VERSION || undefined,
     webVersionRemotePath: process.env.WHATSAPP_WEB_VERSION_REMOTE_PATH || undefined,
     /**

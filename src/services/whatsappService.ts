@@ -263,6 +263,10 @@ export class WhatsappService {
     private readyWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
     private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+    /** The delayed first reconcile after `ready`; see {@link scheduleSettledStart}. */
+    private settleTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Ready and past the settle delay: chats may be opened and messages sent. */
+    private settled = false;
     private reconciling = false;
     /**
      * Chats already reported as unloadable, so the skip is announced once per session instead
@@ -534,8 +538,10 @@ export class WhatsappService {
     }
 
     private assertSendable(message: string | undefined, files: MediaAttachment[]): void {
-        if (!this.isReady()) {
-            throw new WhatsAppNotReadyError(this.status);
+        // Until the page has settled a send would make the library create a chat WhatsApp Web
+        // has not loaded yet, which is what logs the device out; a 503 makes the caller retry.
+        if (!this.isReady() || !this.settled) {
+            throw new WhatsAppNotReadyError(this.status === 'ready' ? 'settling' : this.status);
         }
         if (!message?.trim() && files.length === 0) {
             throw new MessageSendError('Either a message body or at least one file is required.');
@@ -935,10 +941,8 @@ export class WhatsappService {
             this.bulkChatReadFailed = false;
             logger.info('WhatsApp client is ready.');
             void this.logWebVersion();
-            void this.inspectMediaPrep();
             this.startHeartbeat();
-            this.startReconcile();
-            void this.reconcile();
+            this.scheduleSettledStart();
         });
 
         this.client.on('disconnected', (reason) => {
@@ -948,6 +952,7 @@ export class WhatsappService {
                 return;
             }
             this.status = 'disconnected';
+            this.settled = false;
             logger.error('WhatsApp client disconnected', reason);
             void this.recoverFromFrameError(new Error(`disconnected: ${String(reason)}`));
         });
@@ -1530,6 +1535,36 @@ export class WhatsappService {
         }
     }
 
+    /**
+     * Starts reconcile and the media-prep probe a while after `ready` instead of at once.
+     *
+     * The library reports `ready` before WhatsApp Web has finished loading after a reload — and
+     * WhatsApp reloads itself about five minutes after a link. Touching chats in that window got
+     * the session logged out every time (logout_reason=0, CLIENT_FATAL), right after reconcile
+     * failed to open the group chats. `ready` also fires twice per load; the timer is reset
+     * each time so the two collapse into one start.
+     */
+    private scheduleSettledStart(): void {
+        this.settled = false;
+        if (this.settleTimer) {
+            clearTimeout(this.settleTimer);
+        }
+        const delay = Math.max(0, config.whatsapp.postReadyDelayMs);
+        this.settleTimer = setTimeout(() => {
+            this.settleTimer = null;
+            if (this.status !== 'ready' || this.loggedOut) {
+                return;
+            }
+            this.settled = true;
+            logger.info('WhatsApp Web settled; starting reconcile.');
+            void this.inspectMediaPrep();
+            this.startReconcile();
+            void this.reconcile();
+        }, delay);
+        this.settleTimer.unref?.();
+        logger.info('Waiting for WhatsApp Web to settle before reconcile', {delayMs: delay});
+    }
+
     private startReconcile(): void {
         const interval = config.whatsapp.reconcileIntervalMs;
         if (interval <= 0 || this.reconcileTimer || !this.publisher.isEnabled) {
@@ -1541,6 +1576,11 @@ export class WhatsappService {
     }
 
     private stopReconcile(): void {
+        this.settled = false;
+        if (this.settleTimer) {
+            clearTimeout(this.settleTimer);
+            this.settleTimer = null;
+        }
         if (this.reconcileTimer) {
             clearInterval(this.reconcileTimer);
             this.reconcileTimer = null;
@@ -1568,7 +1608,7 @@ export class WhatsappService {
      * back to the bulk read and, if that throws, to reading the ids and fetching chats one at a
      * time so a bad chat costs its own messages instead of the entire pass.
      */
-    private async listChats(): Promise<Chat[]> {
+    private async listChats(): Promise<{chats: Chat[]; complete: boolean}> {
         const allowed = config.rabbitmq.chatIds;
         if (allowed.length > 0) {
             return this.fetchChatsById(allowed);
@@ -1577,7 +1617,7 @@ export class WhatsappService {
         try {
             const chats = await this.client.getChats();
             this.bulkChatReadFailed = false;
-            return chats;
+            return {chats, complete: true};
         } catch (err) {
             if (this.isTransientFrameError(err)) throw err;
 
@@ -1617,10 +1657,30 @@ export class WhatsappService {
         );
     }
 
-    private async fetchChatsById(chatIds: readonly string[]): Promise<Chat[]> {
+    /**
+     * Opens only chats WhatsApp Web already holds in its chat collection.
+     *
+     * `client.getChatById` falls back to `findOrCreateLatestChat` for a chat that is not loaded
+     * yet, i.e. it asks WhatsApp to create a chat that already exists in its database. Right
+     * after a reload that is exactly the state of every chat, and WhatsApp answers it by logging
+     * the device out (CLIENT_FATAL). A chat that is not loaded is skipped for this pass and the
+     * pass is reported incomplete, so nothing it owes is given up.
+     */
+    private async fetchChatsById(chatIds: readonly string[]): Promise<{chats: Chat[]; complete: boolean}> {
         const chats: Chat[] = [];
+        const loaded = new Set(await this.listChatIds());
+        const notLoaded = chatIds.filter((chatId) => !loaded.has(chatId));
+        if (notLoaded.length > 0) {
+            logger.debug('Reconcile: chats not loaded in WhatsApp Web yet; skipped this pass', {
+                notLoaded,
+                loadedCount: loaded.size,
+            });
+        }
 
         for (const chatId of chatIds) {
+            if (!loaded.has(chatId)) {
+                continue;
+            }
             try {
                 const chat = await this.client.getChatById(chatId);
                 if (chat) {
@@ -1632,7 +1692,7 @@ export class WhatsappService {
             }
         }
 
-        return chats;
+        return {chats, complete: notLoaded.length === 0};
     }
 
     /**
@@ -1826,7 +1886,9 @@ export class WhatsappService {
         let allConfirmed = true;
         let published = 0;
         try {
-            for (const chat of await this.listChats()) {
+            const {chats, complete} = await this.listChats();
+            allConfirmed &&= complete;
+            for (const chat of chats) {
                 const outcome = await this.reconcileChat(chat, floor);
                 published += outcome.published;
                 allConfirmed &&= outcome.confirmed;
