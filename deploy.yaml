@@ -25,7 +25,10 @@ metadata:
 data:
   PORT: "3000"
   NODE_ENV: "production"
-  KEYCLOAK_AUTH_SERVER_URL: "http://keycloak.infrastructure.svc.cluster.local:8080"
+  # Keycloak only over TLS (realm k2: sslRequired=all) and through the ingress, so the issuer
+  # built from it ("{URL}/realms/k2") equals the "iss" of real tokens. The k2 root CA comes from the
+  # base image (NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt).
+  KEYCLOAK_AUTH_SERVER_URL: "https://auth.infrastructure.kub.k2.lan"
   KEYCLOAK_REALM: "k2"
   PATH_BASE: ${BASE_PATH}
   WHATSAPP_CLIENT_ID: "default"
