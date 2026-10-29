@@ -132,7 +132,9 @@ Persist the WhatsApp session with a `PersistentVolumeClaim` mounted at
 
 Every `/messages/*` endpoint requires `Authorization: Bearer <token>`.
 Tokens are validated against `"{KEYCLOAK_AUTH_SERVER_URL}/realms/{KEYCLOAK_REALM}"`
-using the realm JWKS. To require a specific role, change the decorator, e.g.:
+using the realm JWKS. In the cluster that is `https://auth.infrastructure.kub.k2.lan` — Keycloak
+answers only over TLS (realm `k2` has `sslRequired=all`), and the ingress name is also what the
+tokens carry in `iss`; an in-cluster `http://keycloak…:8080` would fail both. To require a specific role, change the decorator, e.g.:
 
 ```ts
 @Security('keycloak', ['whatsapp:send'])
