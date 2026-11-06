@@ -189,6 +189,25 @@ curl -X POST http://localhost:3000/messages/chat/send-with-files \
 still works. A malformed id returns `422 WA_CHAT_ID_INVALID`; a well-formed id the linked
 account cannot see returns `404 WA_CHAT_NOT_FOUND`.
 
+### Replying to a message
+
+Every send answers with `messageId`, WhatsApp's id of the first message it dispatched (a replay
+by `idempotencyKey` answers with the original's). Pass it as `quotedMessageId` to
+`/messages/chat/send` to send a reply:
+
+```bash
+curl -X POST http://localhost:3000/messages/chat/send \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{ "chatId": "120363412778233770@g.us", "message": "Дякую!",
+        "quotedMessageId": "true_120363412778233770@g.us_3EB0C767D26A8B0F1E2A_380501234567@c.us" }'
+```
+
+The message counts for more than the quote, so it always goes out: a quoted message WhatsApp can
+no longer find, a chat with no replies (a channel, a status) or a quote that throws inside
+WhatsApp Web's internals (logged as `Quoted send failed`) all send it unquoted. `messageId` is
+optional in the answer, since WhatsApp does not always report one, and sends recorded before ids
+were kept replay without it.
+
 ## Notes on reliability / anti-ban
 
 - Photos, videos and audio (`image/jpeg`, `image/png`, `image/webp`, `video/mp4`,

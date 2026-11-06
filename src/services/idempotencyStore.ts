@@ -10,6 +10,8 @@ import { logger } from '../utils/logger';
 export interface CompletedSend {
   chatId: string;
   sentMessages: number;
+  /** Absent on a send recorded before message ids were kept, or when WhatsApp gave none. */
+  messageId?: string;
   completedAt: number;
 }
 

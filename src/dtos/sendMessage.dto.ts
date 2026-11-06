@@ -71,6 +71,13 @@ export interface SendMessageResponse {
    */
   sentMessages: number;
   /**
+   * WhatsApp's id of the first message dispatched, the one holding the text: pass it as
+   * `quotedMessageId` to reply to it. A replay answers with the original send's id. Absent when
+   * WhatsApp reported none, or on a replay of a send recorded before ids were kept.
+   * @example "true_120363412778233770@g.us_3EB0C767D26A8B0F1E2A_380501234567@c.us"
+   */
+  messageId?: string;
+  /**
    * True when this response replays an earlier send matched by `idempotencyKey`,
    * i.e. nothing new was delivered to WhatsApp.
    */

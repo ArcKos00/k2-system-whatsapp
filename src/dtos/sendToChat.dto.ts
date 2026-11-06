@@ -28,6 +28,14 @@ export interface SendToChatDto {
   files?: MediaFileDto[];
 
   /**
+   * Sends this as a reply to that message, by the `messageId` an earlier send answered with.
+   * With several files, the first one is the reply. The message always goes out: one WhatsApp
+   * can no longer find, or a chat that has no replies (a channel), gets it without the quote.
+   * @example "true_120363412778233770@g.us_3EB0C767D26A8B0F1E2A_380501234567@c.us"
+   */
+  quotedMessageId?: string;
+
+  /**
    * Caller-supplied key that makes this send idempotent. Retrying with the same key
    * returns the original result instead of delivering the message a second time.
    * @example "0f8b9d3a-2c4e-4f1a-9b7d-5e6c8a0d1f23"

@@ -48,6 +48,9 @@ export class ChatMessagesController extends Controller {
    *
    * Pass `idempotencyKey` to make the call safe to retry: the same key never delivers the
    * message twice, it replays the first result instead.
+   *
+   * Pass `quotedMessageId` to send it as a reply. The answer's `messageId` is what a later reply
+   * quotes.
    */
   @Post('send')
   @OperationId('SendToChat')
@@ -62,7 +65,7 @@ export class ChatMessagesController extends Controller {
     }));
 
     const outcome = await runIdempotentSend(this.idempotency, body.idempotencyKey, () =>
-      this.whatsapp.sendMessageToChat(body.chatId, body.message, files),
+      this.whatsapp.sendMessageToChat(body.chatId, body.message, files, body.quotedMessageId),
     );
 
     this.setStatus(outcome.status);

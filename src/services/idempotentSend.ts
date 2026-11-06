@@ -1,6 +1,7 @@
 import { DuplicateSendInFlightError } from '../errors/appErrors';
 import type { SendMessageResponse } from '../dtos/sendMessage.dto';
 import type { IdempotencyStore } from './idempotencyStore';
+import type { SendResult } from './whatsappService';
 
 export interface IdempotentSendOutcome {
   /** 202 for a message that was actually dispatched, 200 when an earlier result is replayed. */
@@ -19,7 +20,7 @@ export interface IdempotentSendOutcome {
 export async function runIdempotentSend(
   idempotency: IdempotencyStore,
   rawKey: string | undefined,
-  send: () => Promise<{ success: boolean; chatId: string; sentMessages: number }>,
+  send: () => Promise<SendResult>,
 ): Promise<IdempotentSendOutcome> {
   const key = rawKey?.trim();
 
@@ -40,6 +41,7 @@ export async function runIdempotentSend(
         success: true,
         chatId: claim.chatId,
         sentMessages: claim.sentMessages,
+        messageId: claim.messageId,
         deduplicated: true,
       },
     };
@@ -50,6 +52,7 @@ export async function runIdempotentSend(
     await idempotency.complete(key, {
       chatId: result.chatId,
       sentMessages: result.sentMessages,
+      messageId: result.messageId,
     });
     return { status: 202, body: result };
   } catch (err) {

@@ -36,7 +36,11 @@ export interface SendResult {
     success: boolean;
     chatId: string;
     sentMessages: number;
+    /** The first message's WhatsApp id, when WhatsApp reported one. */
+    messageId?: string;
 }
+
+type MediaSendOptions = {caption?: string; quotedMessageId?: string};
 
 export type WhatsAppStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected';
 
@@ -341,9 +345,10 @@ export class WhatsappService {
         chatId: string,
         message?: string,
         files: MediaAttachment[] = [],
+        quotedMessageId?: string,
     ): Promise<SendResult> {
         this.assertSendable(message, files);
-        return this.dispatch(await this.resolveTargetChatId(chatId), message, files);
+        return this.dispatch(await this.resolveTargetChatId(chatId), message, files, quotedMessageId);
     }
 
     private assertSendable(message: string | undefined, files: MediaAttachment[]): void {
@@ -366,19 +371,27 @@ export class WhatsappService {
      * picture or player in the chat. Only when WhatsApp refuses it that way — an image too
      * large to preview, a codec it cannot transcode — is the same file re-sent as a document,
      * which WhatsApp accepts for anything. Every other file type is a document from the start.
+     *
+     * A quote goes on the first message only, and `messageId` is that message's id: it holds the
+     * text, so it is what a later reply should quote.
      */
     private async dispatch(
         chatId: string,
         message: string | undefined,
         files: MediaAttachment[],
+        quotedMessageId?: string,
     ): Promise<SendResult> {
         let sentMessages = 0;
+        let first: Message | null | undefined;
         const text = message?.trim() ? message : undefined;
+        const quote = this.quoteFor(chatId, quotedMessageId);
 
         try {
             if (text && files.length === 0) {
                 await this.throttle();
-                await this.client.sendMessage(chatId, text);
+                first = await this.sendQuoting(chatId, quote, (options) =>
+                    this.client.sendMessage(chatId, text, options),
+                );
                 sentMessages += 1;
             }
 
@@ -386,7 +399,10 @@ export class WhatsappService {
                 const media = this.toMessageMedia(file);
                 const caption = index === 0 ? text : undefined;
                 await this.throttle();
-                await this.sendMedia(chatId, media, caption);
+                const sent = await this.sendQuoting(chatId, index === 0 ? quote : undefined, (options) =>
+                    this.sendMedia(chatId, media, caption ? {...options, caption} : options),
+                );
+                if (index === 0) first = sent;
                 sentMessages += 1;
             }
         } catch (err) {
@@ -400,8 +416,45 @@ export class WhatsappService {
             throw new MessageSendError(err instanceof Error ? err.message : String(err));
         }
 
-        logger.info('Message dispatched', {chatId, sentMessages});
-        return {success: true, chatId, sentMessages};
+        const messageId = first?.id?._serialized;
+        logger.info('Message dispatched', {chatId, sentMessages, messageId, quoted: Boolean(quote)});
+        return {success: true, chatId, sentMessages, ...(messageId ? {messageId} : {})};
+    }
+
+    /**
+     * The quote to send with, if any. The library answers a quoted send to a channel or a status
+     * by returning null and sending nothing, so those chats never get one: the message counts
+     * for more than the quote.
+     */
+    private quoteFor(chatId: string, quotedMessageId: string | undefined): string | undefined {
+        if (/@\w*(newsletter|broadcast)\b/.test(chatId)) return undefined;
+        return quotedMessageId?.trim() || undefined;
+    }
+
+    /**
+     * One message, as a reply when there is a quote. A quoted message WhatsApp cannot find is no
+     * failure: the library sends without it. Quoting also reaches into WhatsApp Web's internals,
+     * though, which change under us, and a reply that throws must not cost the message.
+     * Connection-level failures are not retried here — the caller turns them into a reconnect.
+     */
+    private async sendQuoting<T>(
+        chatId: string,
+        quote: string | undefined,
+        send: (options: {quotedMessageId?: string}) => Promise<T>,
+    ): Promise<T> {
+        if (!quote) return send({});
+
+        try {
+            return await send({quotedMessageId: quote});
+        } catch (err) {
+            if (this.isTransientFrameError(err)) throw err;
+            logger.warn('Quoted send failed, sending without the quote', {
+                chatId,
+                reason: this.summarizeError(err),
+            });
+            await this.throttle();
+            return send({});
+        }
     }
 
     /**
@@ -1962,15 +2015,13 @@ export class WhatsappService {
      * second try. Connection-level failures are not retried here — the caller already turns
      * them into a reconnect.
      */
-    private async sendMedia(chatId: string, media: MessageMedia, caption: string | undefined): Promise<void> {
-        const options = caption ? {caption} : {};
+    private async sendMedia(chatId: string, media: MessageMedia, options: MediaSendOptions): Promise<Message> {
         if (!canSendInline(media.mimetype)) {
-            await this.sendAsDocument(chatId, media, options);
-            return;
+            return this.sendAsDocument(chatId, media, options);
         }
 
         try {
-            await this.client.sendMessage(chatId, media, options);
+            return await this.client.sendMessage(chatId, media, options);
         } catch (err) {
             if (this.isTransientFrameError(err)) throw err;
             logger.warn('Inline media rejected, re-sending as document', {
@@ -1980,13 +2031,13 @@ export class WhatsappService {
                 size: media.filesize,
                 reason: err instanceof Error ? err.message : String(err),
             });
-            await this.sendAsDocument(chatId, media, options);
+            return this.sendAsDocument(chatId, media, options);
         }
     }
 
-    private async sendAsDocument(chatId: string, media: MessageMedia, options: {caption?: string}): Promise<void> {
+    private async sendAsDocument(chatId: string, media: MessageMedia, options: MediaSendOptions): Promise<Message> {
         try {
-            await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
+            return await this.client.sendMessage(chatId, media, {...options, sendMediaAsDocument: true});
         } catch (err) {
             await this.logPrepSnapshot(chatId, media);
             throw this.asMediaFailure(err, media);
