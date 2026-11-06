@@ -214,6 +214,35 @@ const messageIdOf = (message: Message): string | undefined => {
     return typeof serialized === 'string' ? serialized : undefined;
 };
 
+/**
+ * The id of a message just sent, the form `quotedMessageId` takes. In this build the key reaches
+ * us as a plain {fromMe, remote, id, participant}: `_serialized` is a getter on its class in the
+ * page and doesn't cross, so the id is rebuilt the way the key's own toString() writes it.
+ */
+const sentMessageIdOf = (message: Message | null | undefined): string | undefined => {
+    if (!message) {
+        return undefined;
+    }
+
+    const known = messageIdOf(message);
+    if (known) {
+        return known;
+    }
+
+    const widText = (wid: unknown): string | undefined => {
+        const text = typeof wid === 'string' ? wid : (wid as {_serialized?: unknown} | undefined)?._serialized;
+        return typeof text === 'string' && text ? text : undefined;
+    };
+    const key = message.id as unknown as {fromMe?: unknown; remote?: unknown; id?: unknown; participant?: unknown} | undefined;
+    const remote = widText(key?.remote);
+    if (typeof key?.fromMe !== 'boolean' || !remote || typeof key.id !== 'string' || !key.id) {
+        return undefined;
+    }
+
+    const participant = widText(key.participant);
+    return `${key.fromMe}_${remote}_${key.id}${participant ? `_${participant}` : ''}`;
+};
+
 @singleton()
 export class WhatsappService {
     private readonly client: Client;
@@ -416,7 +445,7 @@ export class WhatsappService {
             throw new MessageSendError(err instanceof Error ? err.message : String(err));
         }
 
-        const messageId = first?.id?._serialized;
+        const messageId = sentMessageIdOf(first);
         logger.info('Message dispatched', {chatId, sentMessages, messageId, quoted: Boolean(quote)});
         return {success: true, chatId, sentMessages, ...(messageId ? {messageId} : {})};
     }
