@@ -12,6 +12,15 @@
 #     sees only its own folder of the volume and their sessions never touch. While the
 #     PVC is ReadWriteOnce all instances must land on the same node.
 #   * The session is persisted on the PVC; losing it forces a new QR login.
+#   * Failover only (HA v2, stage 11), never two copies: the pod runs on awsbackup or on the
+#     gpu node (localnvidiamachine — its taint is tolerated below), and the Longhorn volume is
+#     replicated to both. When a node dies the pod is evicted after 30 s (not-ready/unreachable
+#     tolerations), Longhorn detaches the volume from the dead node and the pod comes back on
+#     the other one with the same session — no QR. Stale Chromium Singleton* locks left by the
+#     previous host are cleared on start (clearChromiumLocks in whatsappService.ts).
+#     imagePullPolicy is IfNotPresent: Nexus itself lives on awsbackup, so the image has to be
+#     pre-pulled to gpu. No PodDisruptionBudget on purpose: with one replica it would only
+#     block a node drain.
 #   * /health is unauthenticated so probes work without a token.
 # =============================================================================
 ---
@@ -83,27 +92,31 @@ kind: PersistentVolumeClaim
 metadata:
   # Deliberately NOT ${SERVICE_NAME}-scoped: this is the one volume every instance
   # shares; each instance claims its own folder on it via the mount's subPath.
-  name: whatsapp-data
+  #
+  # "-lh": the Longhorn claim that replaced whatsapp-data (local-path, pinned to awsbackup).
+  # The old claim is no longer described here; kubectl apply without --prune leaves it and
+  # its data alone, and it is deleted by hand a week after the move.
+  # That move had to be done out of band, BEFORE this manifest was deployed: the old claim
+  # could be neither resized (local-path has no resizer, the API server rejects it — "only
+  # dynamically provisioned pvc can be resized") nor switched to another StorageClass (the
+  # spec of a bound claim is immutable). So a new claim was created next to it and the
+  # directory was carried over with the app scaled to 0 (114-pvc-migrate.sh create/copy/
+  # check, checksums compared) — otherwise every session is lost and needs a fresh QR.
+  name: whatsapp-data-lh
   namespace: ${NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: longhorn
   resources:
     # Shared by every instance (one subPath folder each): a LocalAuth session plus
     # the idempotency store runs a few hundred MB per instance, and Chromium's
-    # profile cache grows on each WA Web reload.
-    # NOTE: keep this in step with the PVC that is already bound in the cluster.
-    # Raising it on an existing claim is rejected by the API server ("only
-    # dynamically provisioned pvc can be resized") unless the StorageClass sets
-    # allowVolumeExpansion — k3s's default local-path does not, and has no resizer
-    # at all, so the deploy fails on this one object while everything else applies.
-    # On local-path the number is nominal anyway: the volume is a plain directory
-    # on the node under no quota, so the sessions may (and do) outgrow it. To make
-    # it truthful, recreate the claim out of band — which drops the sessions and
-    # forces a fresh QR login unless the directory is carried over by hand.
+    # profile cache grows on each WA Web reload — about 7 GB at the move.
+    # Unlike local-path, Longhorn enforces the size: a full volume stops the session
+    # from writing. The longhorn StorageClass allows expansion, so raising this number
+    # on the bound claim and redeploying grows it in place; shrinking is impossible.
     requests:
-      storage: 1Gi
-  # storageClassName: "{{storage-class}}"   # uncomment / set if no default SC
+      storage: 15Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -131,6 +144,23 @@ spec:
       # Chromium session, close RabbitMQ. A clean exit releases the Chromium
       # SingletonLock on the PVC (the next start clears stale locks anyway).
       terminationGracePeriodSeconds: 60
+      # Failover to the gpu node when awsbackup is gone. The other nodes (mi6-db, VPS) carry
+      # taints of their own and are not eligible; Longhorn keeps replicas only on awsbackup
+      # and gpu anyway. 30 s instead of the default 300 so the gateway is not down for five
+      # minutes after a node loss; this never yields two copies — the old pod is on a dead
+      # node, and the strategy is Recreate.
+      tolerations:
+        - key: k2.arckos.net/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       securityContext:
         # node user (uid 1000) from the base image must own the mounted volume.
         fsGroup: 1000
@@ -250,7 +280,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: whatsapp-data
+            claimName: whatsapp-data-lh
         - name: dshm
           emptyDir:
             # tmpfs — pages actually used count against the container memory limit
