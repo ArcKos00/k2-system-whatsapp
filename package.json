@@ -46,5 +46,30 @@
   },
   "allowScripts": {
     "puppeteer@24.38.0": true
+  },
+  "overrides": {
+    "@tsoa/cli": {
+      "glob": {
+        ".": "^14.0.2",
+        "minimatch": "^11.0.1"
+      },
+      "minimatch": "^11.0.1",
+      "ts-deepmerge": "^8.0.0"
+    },
+    "archiver-utils": {
+      "glob": {
+        ".": "^14.0.2",
+        "minimatch": "^11.0.1"
+      }
+    },
+    "nodemon": {
+      "minimatch": "^11.0.1"
+    },
+    "get-uri": {
+      "basic-ftp": "^6.2.1"
+    },
+    "chromium-bidi": {
+      "zod": "^4.6.6"
+    }
   }
 }
