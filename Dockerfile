@@ -19,6 +19,13 @@ RUN npm prune --omit=dev
 FROM 10.20.50.25:8081/node:26-bookworm-slim AS runtime
 WORKDIR /app
 
+# The Nexus base (Chromium, tini, K2 CA) is rebuilt rarely, while the Jenkins
+# Trivy gate blocks CRITICALs that already have a fix. Pull Debian security
+# updates (chromium, perl-base, libbrotli, ...) on every build (--no-cache).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Cap the Node heap well below the container memory limit (2Gi) so V8 GCs
 # instead of being OOM-killed; the headless Chromium that whatsapp-web.js
 # spawns lives outside this heap, so leave it ample headroom.
