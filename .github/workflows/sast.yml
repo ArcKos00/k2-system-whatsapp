@@ -1,0 +1,99 @@
+# SAST — статичний аналіз коду (П9/T1 «CI-безпека»; ПЗ-01, Р-14, SA-11). Semgrep у контейнері, закріпленому
+# тегом і digest; правила — пакети реєстру semgrep.dev; метрики вимкнено. Звіт (SARIF + JSON) — артефакт
+# `semgrep-report`, зведення — у Summary запуску (лише rule-id/файл/рядок, без фрагментів коду).
+#
+# Режим: SEMGREP_BLOCK = 'true'.
+#   'true'  — знахідка severity ERROR/CRITICAL/HIGH або збій самого Semgrep валить перевірку (fail-closed).
+#   'false' — лише звіт (перевірка завжди зелена). Перехід на блокування: розібрати ERROR (хибні —
+#             `// nosemgrep: <rule-id> — причина`), поставити 'true' і прибрати `continue-on-error`.
+# Markdown (*.md) не скануємо — правила для коду дають на документації лише хибні знахідки.
+# Оновлення образу: тег + digest разом у SEMGREP_IMAGE (digest — `docker image inspect … RepoDigests`).
+name: SAST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-24.04  # GitHub-hosted: репо публічне (PR із форку виконав би код на self-hosted) — org-runner k2-master йому недоступний/небезпечний
+    timeout-minutes: 15
+    env:
+      SEMGREP_IMAGE: docker.io/semgrep/semgrep:1.182.1@sha256:451b3d875c00dac7ed5db5293e584a07de11449a409c10b3c2d2652f429630b6
+      SEMGREP_CONFIGS: p/default p/secrets p/dockerfile p/github-actions p/javascript p/typescript p/nodejs
+      SEMGREP_BLOCK: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # submodule-і не потрібні: аналізуємо лише код цього репо
+      - name: Semgrep scan
+        run: |
+          set -eu
+          mkdir -p semgrep-report
+          args=""
+          for c in $SEMGREP_CONFIGS; do args="$args --config $c"; done
+          # Контейнер під uid runner-а — файли звіту не належатимуть root у робочій теці.
+          # Без --error: знахідки дають код 0; ненульовий код = збій самого інструмента.
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e SEMGREP_SEND_METRICS=off \
+            -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+            semgrep scan --metrics=off $args \
+              --sarif-output=semgrep-report/semgrep.sarif \
+              --json-output=semgrep-report/semgrep.json \
+              --exclude semgrep-report --exclude '*.md' --quiet >/dev/null
+      - name: Summary
+        if: always()
+        run: |
+          [ -f semgrep-report/semgrep.json ] || { echo "### Semgrep: звіту немає (збій сканування — див. крок вище)" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          # Лише rule-id, файл і рядок — без фрагментів коду (p/secrets міг би вивести значення).
+          python3 -I - semgrep-report/semgrep.json >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import collections, json, os, sys
+          d = json.load(open(sys.argv[1]))
+          res = d.get("results", [])
+          sev = collections.Counter(r["extra"].get("severity", "?") for r in res)
+          mode = "блокує ERROR/CRITICAL/HIGH" if os.environ.get("SEMGREP_BLOCK") == "true" else "лише звіт, збірку не блокує"
+          print(f"### Semgrep ({mode})\n")
+          # Правила реєстру мають severity ERROR/WARNING/INFO, новіші — ще CRITICAL/HIGH/MEDIUM/LOW.
+          order = {k: i for i, k in enumerate(["CRITICAL", "ERROR", "HIGH", "WARNING", "MEDIUM", "LOW", "INFO"])}
+          keys = sorted(sev, key=lambda k: order.get(k, 99))
+          print("| " + " | ".join(keys + ["разом", "попереджень інструмента"]) + " |")
+          print("|" + "---|" * (len(keys) + 2))
+          print("| " + " | ".join([str(sev[k]) for k in keys] + [str(len(res)), str(len(d.get("errors", [])))]) + " |\n")
+          top = sorted(res, key=lambda r: (order.get(r["extra"].get("severity"), 9), r["path"], r["start"]["line"]))[:30]
+          if top:
+              print("| severity | правило | місце |\n|---|---|---|")
+              for r in top:
+                  print(f'| {r["extra"].get("severity")} | `{r["check_id"]}` | `{r["path"]}:{r["start"]["line"]}` |')
+              if len(res) > len(top):
+                  print(f"\n…ще {len(res) - len(top)} — повний звіт в артефакті `semgrep-report`.")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep-report/
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Gate (ERROR/CRITICAL/HIGH)
+        if: always() && env.SEMGREP_BLOCK == 'true'
+        run: |
+          [ -f semgrep-report/semgrep.json ] || { echo "::error::Semgrep не дав звіту (збій інструмента) — перевірка блокує"; exit 1; }
+          python3 -I - semgrep-report/semgrep.json <<'PY'
+          import json, sys
+          bad = [r for r in json.load(open(sys.argv[1])).get("results", [])
+                 if r["extra"].get("severity") in ("ERROR", "CRITICAL", "HIGH")]
+          for r in bad:
+              print(f'::error file={r["path"]},line={r["start"]["line"]}::{r["check_id"]} ({r["extra"].get("severity")})')
+          if bad:
+              sys.exit(f"Semgrep: {len(bad)} знахідок ERROR/CRITICAL/HIGH. Справжня — виправити; хибна — "
+                       "`nosemgrep: <rule-id>` з причиною в тому ж рядку.")
+          print("Semgrep: ERROR/CRITICAL/HIGH немає.")
+          PY
