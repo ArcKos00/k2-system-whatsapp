@@ -24,14 +24,6 @@ function bool(name: string, fallback: boolean): boolean {
   return fallback;
 }
 
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
 function normalizePathBase(raw?: string): string {
   const trimmed = raw?.trim();
   if (!trimmed || trimmed === '/') return '';
@@ -44,9 +36,11 @@ export const config = {
   env: process.env.NODE_ENV ?? 'development',
   pathBase: normalizePathBase(process.env.PATH_BASE),
 
+  // Optional: no endpoint carries @Security today, so the gateway runs without Keycloak.
+  // Once an endpoint is protected, both must be set — until then such a request gets 401.
   keycloak: {
-    authServerUrl: required('KEYCLOAK_AUTH_SERVER_URL').replace(/\/+$/, ''),
-    realm: required('KEYCLOAK_REALM'),
+    authServerUrl: (process.env.KEYCLOAK_AUTH_SERVER_URL ?? '').trim().replace(/\/+$/, ''),
+    realm: (process.env.KEYCLOAK_REALM ?? '').trim(),
     audience: process.env.KEYCLOAK_AUDIENCE ?? '',
   },
 

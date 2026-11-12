@@ -34,8 +34,8 @@ metadata:
 data:
   PORT: "3000"
   NODE_ENV: "production"
-  KEYCLOAK_AUTH_SERVER_URL: "http://keycloak.infrastructure.svc.cluster.local:8080"
-  KEYCLOAK_REALM: "k2"
+  # KEYCLOAK_AUTH_SERVER_URL / KEYCLOAK_REALM are deliberately unset: no endpoint has
+  # @Security, so token validation is unused (the old :8080 in-cluster address was dead).
   PATH_BASE: ${BASE_PATH}
   WHATSAPP_CLIENT_ID: "default"
   WHATSAPP_SESSION_PATH: "/app/data/sessions"

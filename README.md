@@ -124,9 +124,14 @@ Persist the WhatsApp session with a `PersistentVolumeClaim` mounted at
 
 ## Authentication
 
-Every `/messages/*` endpoint requires `Authorization: Bearer <token>`.
-Tokens are validated against `"{KEYCLOAK_AUTH_SERVER_URL}/realms/{KEYCLOAK_REALM}"`
-using the realm JWKS. To require a specific role, change the decorator, e.g.:
+No endpoint is protected right now (`@Security` is commented out on the
+controllers), so `KEYCLOAK_AUTH_SERVER_URL` / `KEYCLOAK_REALM` are optional and
+are not set in `deploy.yaml`. Once `@Security('keycloak')` is enabled, both must be
+set: tokens are validated against `"{KEYCLOAK_AUTH_SERVER_URL}/realms/{KEYCLOAK_REALM}"`
+using the realm JWKS, and without them every protected request gets 401.
+`iss` must match exactly, so use the same public Keycloak URL that issues the
+tokens, not the in-cluster `keycloak.infrastructure.svc` address. To require a
+specific role, change the decorator, e.g.:
 
 ```ts
 @Security('keycloak', ['whatsapp:send'])

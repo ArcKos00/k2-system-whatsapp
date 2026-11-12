@@ -5,20 +5,30 @@ import { config } from '../config/env';
 import { logger } from '../utils/logger';
 import { ForbiddenError, UnauthorizedError } from '../errors/appErrors';
 
-const issuer = `${config.keycloak.authServerUrl}/realms/${config.keycloak.realm}`;
-const jwksUri = `${issuer}/protocol/openid-connect/certs`;
+// Empty when KEYCLOAK_AUTH_SERVER_URL / KEYCLOAK_REALM are not set: then every protected
+// endpoint answers 401 (fail closed) instead of the gateway refusing to start.
+const issuer =
+  config.keycloak.authServerUrl && config.keycloak.realm
+    ? `${config.keycloak.authServerUrl}/realms/${config.keycloak.realm}`
+    : '';
 
-const jwks = new JwksClient({
-  jwksUri,
-  cache: true,
-  cacheMaxAge: 10 * 60 * 1000,
-  rateLimit: true,
-  jwksRequestsPerMinute: 10,
-});
+const jwks = issuer
+  ? new JwksClient({
+      jwksUri: `${issuer}/protocol/openid-connect/certs`,
+      cache: true,
+      cacheMaxAge: 10 * 60 * 1000,
+      rateLimit: true,
+      jwksRequestsPerMinute: 10,
+    })
+  : null;
 
 function getKey(header: JwtHeader, callback: SigningKeyCallback): void {
   if (!header.kid) {
     callback(new Error('Token header is missing "kid"'));
+    return;
+  }
+  if (!jwks) {
+    callback(new Error('Keycloak is not configured'));
     return;
   }
   jwks.getSigningKey(header.kid, (err, key) => {
@@ -65,6 +75,11 @@ export async function expressAuthentication(
 ): Promise<JwtPayload> {
   if (securityName !== 'keycloak') {
     throw new UnauthorizedError(`Unknown security scheme: ${securityName}`);
+  }
+
+  if (!issuer) {
+    logger.error('Protected endpoint called but KEYCLOAK_AUTH_SERVER_URL / KEYCLOAK_REALM are not set');
+    throw new UnauthorizedError('Authentication is not configured');
   }
 
   const header = request.headers.authorization;
