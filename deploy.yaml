@@ -144,6 +144,8 @@ spec:
       # Chromium session, close RabbitMQ. A clean exit releases the Chromium
       # SingletonLock on the PVC (the next start clears stale locks anyway).
       terminationGracePeriodSeconds: 60
+      # The gateway never talks to the Kubernetes API, so no service-account token in the pod.
+      automountServiceAccountToken: false
       # Failover to the gpu node when awsbackup is gone. The other nodes (mi6-db, VPS) carry
       # taints of their own and are not eligible; Longhorn keeps replicas only on awsbackup
       # and gpu anyway. 30 s instead of the default 300 so the gateway is not down for five
@@ -162,15 +164,23 @@ spec:
           effect: NoExecute
           tolerationSeconds: 30
       securityContext:
-        # node user (uid 1000) from the base image must own the mounted volume.
-        fsGroup: 1000
+        # node user (uid 1000) from the base image must own the mounted volume. The image names
+        # the user (USER node), so the numeric uid has to be here for runAsNonRoot to be checked.
         runAsNonRoot: true
         runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # Regroup the volume only when its root is not gid 1000 yet — not a recursive chgrp of
+        # every session file on each start.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       # kubelet creates a missing subPath directory as root:root, and fsGroup does not
       # reliably reach through a subPath mount — so the instance's folder is prepared
-      # here, on the volume root, before the app container ever mounts it.
+      # here, on the volume root, before the app container ever mounts it. fsGroup does reach
+      # the volume root (gid 1000, g+rws), so uid 1000 can make the folder there without root;
+      # no chown — the folder is born 1000:1000 and everything in it is written by uid 1000.
+      # Pod Security "restricted" rejects a root container, CHOWN or DAC_OVERRIDE.
       initContainers:
         - name: prepare-data-dir
           image: "${REPOSITORY}:${IMAGE_TAG}"
@@ -178,18 +188,13 @@ spec:
           command:
             - sh
             - -c
-            - mkdir -p "/volume/${SERVICE_NAME}" && chown -R 1000:1000 "/volume/${SERVICE_NAME}"
+            - mkdir -p "/volume/${SERVICE_NAME}"
           securityContext:
-            # The one container allowed to be root: it exists to hand the folder to uid 1000.
-            runAsNonRoot: false
-            runAsUser: 0
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
-              add:
-                - CHOWN
-                - DAC_OVERRIDE
           # Tiny, but set: without them the pod is BestEffort while this container runs.
           resources:
             requests:
