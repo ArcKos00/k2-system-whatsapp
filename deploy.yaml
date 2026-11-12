@@ -230,6 +230,12 @@ spec:
                 name: whatsapp-to-rabbit-config
             - configMapRef:
                 name: rabbitmq-config
+            # Own RabbitMQ account (RABBITMQ_URL). Must stay last so it overrides any URL in
+            # the ConfigMaps above; optional so the pod still starts before the Secret exists.
+            # Without it the deploy drops wa-reader to no broker -> inbound forwarding off.
+            - secretRef:
+                name: ${SERVICE_NAME}-rabbit-secret
+                optional: true
           volumeMounts:
             # The PVC is shared between instances; subPath keeps each one inside its own
             # folder of the volume while the container keeps seeing plain /app/data — so
