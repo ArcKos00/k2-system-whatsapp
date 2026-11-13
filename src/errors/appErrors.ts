@@ -10,9 +10,20 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * The session cannot serve the request right now. `status` picks the explanation: with no
+ * linked account (`qr`, `logged_out`) the fix is to log in, otherwise to wait for reconnection.
+ */
 export class WhatsAppNotReadyError extends AppError {
-  constructor() {
-    super('WhatsApp client is not connected. Scan the QR code or wait for reconnection.', 503, 'WA_NOT_READY');
+  constructor(status?: string) {
+    const loggedOut = status === 'qr' || status === 'logged_out';
+    super(
+      loggedOut
+        ? `WhatsApp is not logged in (status: ${status}). Call POST /session/login and scan the QR at GET /session/qr.`
+        : `WhatsApp client is not connected${status ? ` (status: ${status})` : ''}. Wait for reconnection.`,
+      503,
+      loggedOut ? 'WA_NOT_LOGGED_IN' : 'WA_NOT_READY',
+    );
   }
 }
 
@@ -80,5 +91,16 @@ export class InvalidChatIdError extends AppError {
 export class ChatNotFoundError extends AppError {
   constructor(chatId: string) {
     super(`Chat is not available to the linked WhatsApp account: ${chatId}`, 404, 'WA_CHAT_NOT_FOUND');
+  }
+}
+
+/** `GET /session/qr` was asked for a QR while the session is not showing one. */
+export class QrNotAvailableError extends AppError {
+  constructor(status: string) {
+    super(
+      `No QR pending (WhatsApp status: ${status}). Call POST /session/login to start a session.`,
+      404,
+      'QR_NOT_AVAILABLE',
+    );
   }
 }

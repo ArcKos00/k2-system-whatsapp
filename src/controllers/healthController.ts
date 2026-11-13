@@ -1,6 +1,7 @@
 import { Controller, Get, Query, Route, Tags } from 'tsoa';
 import { injectable } from 'tsyringe';
 import { MediaPrepReport, WhatsappService, WhatsAppStatus } from '../services/whatsappService';
+import { WhatsAppNotReadyError } from '../errors/appErrors';
 
 export interface HealthResponse {
   status: 'ok';
@@ -39,6 +40,9 @@ export class HealthController extends Controller {
    */
   @Get('media-prep')
   public async mediaPrep(@Query() chatId?: string, @Query() pixels?: number): Promise<MediaPrepReport> {
+    if (!this.whatsapp.isReady()) {
+      throw new WhatsAppNotReadyError(this.whatsapp.getStatus());
+    }
     return this.whatsapp.inspectMediaPrep(chatId, pixels);
   }
 }

@@ -73,6 +73,17 @@ export const config = {
     cursorPath: process.env.WHATSAPP_CURSOR_PATH || undefined,
     initMaxAttempts: num('WHATSAPP_INIT_MAX_ATTEMPTS', 3),
     initTimeoutMs: num('WHATSAPP_INIT_TIMEOUT_MS', 90000),
+    /**
+     * How long `POST /session/login` waits for the session to show a QR (or come up ready)
+     * before answering with whatever state it is in. The QR stays at `GET /qr` either way.
+     */
+    loginWaitMs: num('WHATSAPP_LOGIN_WAIT_MS', 60000),
+    /**
+     * How long after `ready` reconcile and the media-prep probe wait before they touch chats.
+     * WhatsApp Web keeps loading after the library reports ready, and opening chats in that
+     * window got the device logged out (CLIENT_FATAL).
+     */
+    postReadyDelayMs: num('WHATSAPP_POST_READY_DELAY_MS', 20000),
     webVersion: process.env.WHATSAPP_WEB_VERSION || undefined,
     webVersionRemotePath: process.env.WHATSAPP_WEB_VERSION_REMOTE_PATH || undefined,
     /**
@@ -134,6 +145,7 @@ export const config = {
     url: process.env.RABBITMQ_URL || undefined,
     exchange: process.env.RABBITMQ_EXCHANGE ?? 'whatsapp.messages',
     reconnectDelayMs: num('RABBITMQ_RECONNECT_DELAY_MS', 5000),
+    connectTimeoutMs: num('RABBITMQ_CONNECT_TIMEOUT_MS', 10000),
     chatIds: list('RABBITMQ_CHAT_IDS'),
   },
 } as const;

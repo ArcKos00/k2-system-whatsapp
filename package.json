@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-api-gateway",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "API gateway for whatsapp-web.js secured with Keycloak, documented with tsoa/Swagger.",
   "main": "dist/server.js",
   "scripts": {
@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@tsoa/runtime": "^6.6.0",
-    "amqplib": "^2.2.0",
+    "amqplib": "^2.2.1",
     "dotenv": "^18.0.9",
     "elastic-apm-node": "^4.18.0",
     "express": "^5.3.0",
