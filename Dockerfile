@@ -38,11 +38,14 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 
 # Persisted WhatsApp session lives here — mount a volume to keep it.
-RUN mkdir -p /app/data/sessions
+# Code and node_modules stay root-owned (read-only for the process); only what the app writes belongs to
+# node: the data volume and whatsapp-web.js's .wwebjs_cache, which it creates in the working directory.
+# (chown -R /app used to copy all of node_modules into a ~40 MB layer of its own.)
+RUN mkdir -p /app/data/sessions /app/.wwebjs_cache \
+    && chown node:node /app/data /app/data/sessions /app/.wwebjs_cache
 VOLUME ["/app/data"]
 
 # Run as the non-root user that the node image ships with.
-RUN chown -R node:node /app
 USER node
 
 EXPOSE 3000
