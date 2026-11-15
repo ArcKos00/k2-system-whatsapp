@@ -21,8 +21,12 @@ WORKDIR /app
 
 # The Nexus base (Chromium, tini, K2 CA) is rebuilt rarely, while the Jenkins
 # Trivy gate blocks CRITICALs that already have a fix. Pull Debian security
-# updates (chromium, perl-base, libbrotli, ...) on every build (--no-cache).
-RUN apt-get update \
+# updates (chromium, perl-base, libbrotli, ...). The job builds with --pull and layer cache, so this
+# layer is reused until the base changes or BASE_REFRESH does: Jenkins passes the week number
+# (--build-arg BASE_REFRESH="$(date +%G-W%V)"), so it is rebuilt with fresh patches once a week.
+ARG BASE_REFRESH=none
+RUN echo "base refresh: ${BASE_REFRESH}" \
+    && apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
