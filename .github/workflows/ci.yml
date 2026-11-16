@@ -1,0 +1,56 @@
+# CI: go vet, unit tests, and the integration test (Postgres + RabbitMQ as service containers: the
+# outbox, the owner lock, idempotency keys, a publish confirmed by a consumer bound on chatId).
+# GitHub-hosted, like SAST: the repository is public, so the self-hosted k2 runners must not run its PRs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: whatsapp
+        ports: ["5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 30
+      rabbitmq:
+        image: rabbitmq:4-alpine
+        ports: ["5672"]
+        options: --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Role and schema as in production (wa_reader, search_path = wa_reader)
+        env:
+          PGPASSWORD: test
+        run: |
+          psql -h localhost -p ${{ job.services.postgres.ports['5432'] }} -U postgres -d whatsapp -v ON_ERROR_STOP=1 \
+            -c "create role wa_reader login password 'test'" \
+            -c "create schema wa_reader authorization wa_reader" \
+            -c "alter role wa_reader set search_path = wa_reader"
+      - name: Vet
+        run: go vet ./...
+      - name: Unit and integration tests
+        env:
+          WA_TEST_DATABASE_URL: postgres://wa_reader:test@localhost:${{ job.services.postgres.ports['5432'] }}/whatsapp?sslmode=disable
+          WA_TEST_RABBITMQ_URL: amqp://guest:guest@localhost:${{ job.services.rabbitmq.ports['5672'] }}/
+        run: go test -race -tags integration -count=1 ./...

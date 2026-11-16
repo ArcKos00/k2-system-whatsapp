@@ -1,0 +1,1090 @@
+{
+  "openapi": "3.0.0",
+  "components": {
+    "examples": {},
+    "headers": {},
+    "parameters": {},
+    "requestBodies": {},
+    "responses": {},
+    "schemas": {
+      "ErrorResponse": {
+        "description": "Standard error envelope returned by the API.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "details": {}
+        },
+        "required": [
+          "message",
+          "code"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "SendMessageResponse": {
+        "description": "Result of a send operation.",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "chatId": {
+            "type": "string",
+            "description": "Resolved WhatsApp chat id, e.g. `380501234567@c.us`."
+          },
+          "sentMessages": {
+            "type": "number",
+            "format": "double",
+            "description": "Number of individual WhatsApp messages dispatched. With attachments the text is sent\nas the caption of the first file, so this equals the number of files; without\nattachments it is 1."
+          },
+          "messageId": {
+            "type": "string",
+            "description": "WhatsApp's id of the first message dispatched, the one holding the text: pass it as\n`quotedMessageId` to reply to it. A replay answers with the original send's id. Absent when\nWhatsApp reported none, or on a replay of a send recorded before ids were kept.",
+            "example": "true_120363412778233770@g.us_3EB0C767D26A8B0F1E2A_380501234567@c.us"
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "description": "True when this response replays an earlier send matched by `idempotencyKey`,\ni.e. nothing new was delivered to WhatsApp."
+          }
+        },
+        "required": [
+          "success",
+          "chatId",
+          "sentMessages"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "MediaFileDto": {
+        "description": "A single attachment encoded as base64 inside a JSON request.\nPrefer the multipart endpoint for large files.",
+        "properties": {
+          "base64": {
+            "type": "string",
+            "description": "Base64-encoded file content WITHOUT the `data:<mime>;base64,` prefix."
+          },
+          "mimetype": {
+            "type": "string",
+            "description": "MIME type of the file. Decides whether the file shows up inline (`image/jpeg`,\n`image/png`, `video/mp4`, `audio/mpeg`, …) or as a document. A generic\n`application/octet-stream` is replaced by the type the `filename` extension implies.",
+            "example": "image/png"
+          },
+          "filename": {
+            "type": "string",
+            "description": "File name including extension.",
+            "example": "invoice.pdf"
+          }
+        },
+        "required": [
+          "base64",
+          "mimetype",
+          "filename"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "SendMessageDto": {
+        "description": "Payload for sending a WhatsApp message via the JSON endpoint.",
+        "properties": {
+          "phoneNumber": {
+            "type": "string",
+            "description": "Recipient phone number in international format. Non-digit characters\n(spaces, dashes, leading `+`) are stripped automatically.",
+            "example": "380501234567"
+          },
+          "message": {
+            "type": "string",
+            "description": "Text body of the message. Optional when at least one file is attached; when files are\nattached it is delivered as the caption of the first file, in the same message.",
+            "example": "Вітаємо! Ваше замовлення прийнято."
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/MediaFileDto"
+            },
+            "type": "array",
+            "description": "Optional attachments, base64-encoded. Photos, videos and audio are delivered as inline\nmedia (a picture or player in the chat) whenever WhatsApp accepts them that way, and fall\nback to a document otherwise; every other file type is delivered as a document."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "Caller-supplied key that makes this send idempotent. Retrying with the same key\nreturns the original result instead of delivering the message a second time,\nwhich is what lets a caller retry safely after a timeout or a crash.",
+            "example": "0f8b9d3a-2c4e-4f1a-9b7d-5e6c8a0d1f23"
+          }
+        },
+        "required": [
+          "phoneNumber"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "WhatsAppStatus": {
+        "type": "string",
+        "enum": [
+          "initializing",
+          "qr",
+          "authenticated",
+          "ready",
+          "disconnected",
+          "logged_out"
+        ]
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ],
+            "nullable": false
+          },
+          "whatsapp": {
+            "$ref": "#/components/schemas/WhatsAppStatus"
+          }
+        },
+        "required": [
+          "status",
+          "whatsapp"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "Record_string.unknown_": {
+        "properties": {},
+        "additionalProperties": {},
+        "type": "object",
+        "description": "Construct a type with a set of properties K of type T"
+      },
+      "ReadinessResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "not_ready"
+            ]
+          },
+          "whatsapp": {
+            "$ref": "#/components/schemas/WhatsAppStatus"
+          }
+        },
+        "required": [
+          "status",
+          "whatsapp"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ChatNameSource": {
+        "type": "string",
+        "enum": [
+          "title",
+          "subject",
+          "contact",
+          "pushname",
+          "verifiedName",
+          "number",
+          "fallback"
+        ],
+        "description": "Where `name` came from. Useful when a listing looks wrong: `number` or `fallback` means\nWhatsApp gave us nothing human-readable for that chat, not that the gateway dropped it."
+      },
+      "ChatKind": {
+        "type": "string",
+        "enum": [
+          "group",
+          "private",
+          "lid",
+          "channel",
+          "broadcast",
+          "unknown"
+        ],
+        "description": "What kind of thread the id points at. Derived from the id's server part, so it is known\neven for a chat WhatsApp would not let the library model."
+      },
+      "ChatSummaryDto": {
+        "description": "One chat the linked WhatsApp account can see. This is how you find the ids to put in\n`RABBITMQ_CHAT_IDS`: read the list, take the `id` of the chats you want forwarded.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The chat id, exactly as the forward allowlist expects it. Groups end in `@g.us`,\none-to-one chats in `@c.us`, and linked-identity threads in `@lid`.",
+            "example": "120363412778233770@g.us"
+          },
+          "name": {
+            "type": "string",
+            "description": "Best human-readable name WhatsApp exposes: the chat title, else the group subject,\nelse the contact's saved name / business name / public push name, else the phone\nnumber. Absent only when the account genuinely has nothing to show."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "Same as `name`, but never empty — it falls back to the id's own user part so every row\nin the listing has something to display."
+          },
+          "nameSource": {
+            "$ref": "#/components/schemas/ChatNameSource",
+            "description": "Which of the sources above `name` came from."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ChatKind",
+            "description": "Group, one-to-one, linked identity, channel or broadcast list."
+          },
+          "isGroup": {
+            "type": "boolean",
+            "description": "True for group chats."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Group subject / channel title as WhatsApp stores it, even when the chat title is\nmissing. This is what usually fills in for an unnamed group."
+          },
+          "description": {
+            "type": "string",
+            "description": "Group or channel description text (\"Опис групи\"), when one is set."
+          },
+          "participantCount": {
+            "type": "number",
+            "format": "double",
+            "description": "How many members the group has, when the metadata is loaded."
+          },
+          "phoneNumber": {
+            "type": "string",
+            "description": "Phone number behind a one-to-one chat, digits only."
+          },
+          "pushName": {
+            "type": "string",
+            "description": "Contact's public push name, kept separately from the resolved `name`."
+          },
+          "verifiedName": {
+            "type": "string",
+            "description": "Verified business name, when the counterpart is a WhatsApp Business account."
+          },
+          "isMyContact": {
+            "type": "boolean",
+            "description": "True when the number is saved in the linked phone's address book."
+          },
+          "isReadOnly": {
+            "type": "boolean",
+            "description": "True when the chat cannot be written to (announcement group, read-only channel)."
+          },
+          "archived": {
+            "type": "boolean",
+            "description": "True when the chat is archived."
+          },
+          "timestamp": {
+            "type": "number",
+            "format": "double",
+            "description": "Unix time (seconds) of the last activity in the chat."
+          },
+          "unreadCount": {
+            "type": "number",
+            "format": "double",
+            "description": "Unread messages WhatsApp reports for this chat."
+          },
+          "forwarded": {
+            "type": "boolean",
+            "description": "Whether messages from this chat are currently forwarded, i.e. the id is in\n`RABBITMQ_CHAT_IDS` (or the allowlist is empty, which forwards everything)."
+          }
+        },
+        "required": [
+          "id",
+          "displayName",
+          "kind",
+          "forwarded"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ChatListResponse": {
+        "description": "The chat list plus what could not be read. WhatsApp occasionally serves a chat the client\nlibrary cannot model; those are reported here by id instead of failing the whole listing.",
+        "properties": {
+          "chats": {
+            "items": {
+              "$ref": "#/components/schemas/ChatSummaryDto"
+            },
+            "type": "array"
+          },
+          "unreadableChatIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "Ids that could not be loaded. Their messages are also skipped by reconcile."
+          },
+          "allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "The configured forward allowlist. Empty means every chat is forwarded."
+          },
+          "unnamedCount": {
+            "type": "number",
+            "format": "double",
+            "description": "How many chats still have no human-readable name after every lookup. A non-zero count\nmeans WhatsApp itself holds nothing for them, typically strangers who never set a push\nname and groups whose metadata the account has not synced yet."
+          }
+        },
+        "required": [
+          "chats",
+          "unreadableChatIds",
+          "allowlist",
+          "unnamedCount"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "SendToChatDto": {
+        "description": "Payload for sending to a chat that is already known by its WhatsApp id, which is the only\nway to reach a group: a group has no phone number to resolve.",
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "description": "Target chat id as `GET /chats` reports it — `<id>@g.us` for a group, `<id>@c.us` for a\none-to-one chat, `<id>@lid` for a linked identity, `<id>@newsletter` for a channel.\nA bare number is accepted too and read as `<number>@c.us`, and `<a>-<b>` as `<a>-<b>@g.us`.",
+            "example": "120363412778233770@g.us"
+          },
+          "message": {
+            "type": "string",
+            "description": "Text body of the message. Optional when at least one file is attached; when files are\nattached it is delivered as the caption of the first file, in the same message.",
+            "example": "Вітаємо! Ваше замовлення прийнято."
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/MediaFileDto"
+            },
+            "type": "array",
+            "description": "Optional attachments, base64-encoded. Photos, videos and audio are delivered as inline\nmedia (a picture or player in the chat) whenever WhatsApp accepts them that way, and fall\nback to a document otherwise; every other file type is delivered as a document."
+          },
+          "quotedMessageId": {
+            "type": "string",
+            "description": "Sends this as a reply to that message, by the `messageId` an earlier send answered with.\nWith several files, the first one is the reply. The message always goes out: one WhatsApp\ncan no longer find, or a chat that has no replies (a channel), gets it without the quote.",
+            "example": "true_120363412778233770@g.us_3EB0C767D26A8B0F1E2A_380501234567@c.us"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "Caller-supplied key that makes this send idempotent. Retrying with the same key\nreturns the original result instead of delivering the message a second time.",
+            "example": "0f8b9d3a-2c4e-4f1a-9b7d-5e6c8a0d1f23"
+          }
+        },
+        "required": [
+          "chatId"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "SessionStateResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "qrPending"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/WhatsAppStatus"
+          },
+          "qrPending": {
+            "type": "boolean",
+            "description": "Whether a login QR is waiting to be scanned right now."
+          },
+          "qrUrl": {
+            "type": "string",
+            "description": "Where the QR PNG is served while qrPending is true (includes PATH_BASE)."
+          }
+        }
+      },
+      "LogoutResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SessionStateResponse"
+          },
+          {
+            "type": "object",
+            "required": [
+              "deviceUnlinked"
+            ],
+            "properties": {
+              "deviceUnlinked": {
+                "type": "boolean",
+                "description": "Whether WhatsApp confirmed the unlink. false: the local session was dropped anyway; the phone may still list the device."
+              }
+            }
+          }
+        ]
+      },
+      "PairCodeRequest": {
+        "type": "object",
+        "required": [
+          "phoneNumber"
+        ],
+        "properties": {
+          "phoneNumber": {
+            "type": "string",
+            "example": "380501234567",
+            "description": "The linked account's number, international format."
+          }
+        }
+      },
+      "PairCodeResponse": {
+        "type": "object",
+        "required": [
+          "code",
+          "status"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "example": "ABCD-EFGH",
+            "description": "Type it on the phone: WhatsApp ▸ Linked devices ▸ Link with phone number."
+          },
+          "status": {
+            "$ref": "#/components/schemas/WhatsAppStatus"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "keycloak": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "info": {
+    "title": "WhatsApp API Gateway",
+    "version": "2.0.0",
+    "description": "REST gateway over WhatsApp (whatsmeow, linked device — no browser). Paths, bodies and error codes are those of 1.x. No endpoint requires a token: keep the gateway on the internal network."
+  },
+  "paths": {
+    "/messages/send": {
+      "post": {
+        "operationId": "Send",
+        "responses": {
+          "202": {
+            "description": "Accepted — message dispatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Phone number not registered on WhatsApp",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A send with the same idempotency key is in flight",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp client not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Send a text message and/or base64-encoded attachments as JSON.\nBest for small payloads; use the multipart endpoint for larger files.\n\nPass `idempotencyKey` to make the call safe to retry: the same key never\ndelivers the message twice, it replays the first result instead.",
+        "tags": [
+          "Messages"
+        ],
+        "security": [],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageDto"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/send-with-files": {
+      "post": {
+        "operationId": "SendWithFiles",
+        "responses": {
+          "202": {
+            "description": "Accepted — message dispatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid attachment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Phone number not registered on WhatsApp",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp client not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Send a message with one or more uploaded files (multipart/form-data).\nFiles are received in memory and forwarded as WhatsApp media.",
+        "tags": [
+          "Messages"
+        ],
+        "security": [],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phoneNumber": {
+                    "type": "string"
+                  },
+                  "files": {
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "phoneNumber",
+                  "files"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "Health",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "parameters": []
+      }
+    },
+    "/ready": {
+      "get": {
+        "operationId": "Ready",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "parameters": []
+      }
+    },
+    "/chats": {
+      "get": {
+        "operationId": "List",
+        "responses": {
+          "200": {
+            "description": "Chats listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatListResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp client not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "List every chat with the id the forward allowlist keys on, newest activity first.\n\nThis is how you fill `RABBITMQ_CHAT_IDS`: take the `id` of each chat you want forwarded,\nand the same id is what `POST /messages/chat/send` addresses. `forwarded` shows what the\ncurrent allowlist does with the chat, and chats WhatsApp would not let us read are\nreturned as bare ids under `unreadableChatIds`.\n\nEach chat is described as fully as WhatsApp will allow: the group subject and description\nfor a group, the saved contact name / business name / push name and the phone number for\na one-to-one chat. `displayName` is always filled, and `nameSource` says which of those\nthe name came from, so `fallback` marks a chat WhatsApp itself holds no name for.",
+        "tags": [
+          "Chats"
+        ],
+        "security": [],
+        "parameters": []
+      }
+    },
+    "/messages/chat/send": {
+      "post": {
+        "operationId": "SendToChat",
+        "responses": {
+          "202": {
+            "description": "Accepted — message dispatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Chat not available to the linked account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A send with the same idempotency key is in flight",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed, or the chat id is malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp client not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Send a text message and/or base64-encoded attachments to a chat id, as JSON.\n\nPass `idempotencyKey` to make the call safe to retry: the same key never delivers the\nmessage twice, it replays the first result instead.\n\nPass `quotedMessageId` to send it as a reply. The answer's `messageId` is what a later reply\nquotes.",
+        "tags": [
+          "Messages"
+        ],
+        "security": [],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendToChatDto"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/chat/send-with-files": {
+      "post": {
+        "operationId": "SendToChatWithFiles",
+        "responses": {
+          "202": {
+            "description": "Accepted — message dispatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid attachment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Chat not available to the linked account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A send with the same idempotency key is in flight",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "WhatsApp client not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Send to a chat id with one or more uploaded files (multipart/form-data).\nFiles are received in memory and forwarded as WhatsApp media.",
+        "tags": [
+          "Messages"
+        ],
+        "security": [],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "chatId": {
+                    "type": "string"
+                  },
+                  "files": {
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "chatId",
+                  "files"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session": {
+      "get": {
+        "operationId": "GetSession",
+        "tags": [
+          "Session"
+        ],
+        "summary": "Current session state and, while one is pending, where to find the login QR.",
+        "responses": {
+          "200": {
+            "description": "Ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/login": {
+      "post": {
+        "operationId": "Login",
+        "tags": [
+          "Session"
+        ],
+        "summary": "Start a session if none is running and wait (WHATSAPP_LOGIN_WAIT_MS) until it shows a QR or is ready. A linked session is left as it is.",
+        "responses": {
+          "200": {
+            "description": "Session started or already running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStateResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Standby replica",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/logout": {
+      "post": {
+        "operationId": "Logout",
+        "tags": [
+          "Session"
+        ],
+        "summary": "Unlink this device and delete the session. Stays logged out until POST /session/login.",
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Standby replica",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/qr": {
+      "get": {
+        "operationId": "GetSessionQr",
+        "tags": [
+          "Session"
+        ],
+        "summary": "302 to the login QR PNG (GET /qr) while one is pending.",
+        "responses": {
+          "302": {
+            "description": "Redirect to the QR image"
+          },
+          "404": {
+            "description": "No QR pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/pair-code": {
+      "post": {
+        "operationId": "PairCode",
+        "tags": [
+          "Session"
+        ],
+        "summary": "New in 2.0: link with an 8-character code typed on the phone instead of scanning the QR.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Code issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairCodeResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already linked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "WhatsApp refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/qr": {
+      "get": {
+        "operationId": "GetQr",
+        "tags": [
+          "Session"
+        ],
+        "summary": "Login QR as a PNG while authentication is pending.",
+        "responses": {
+          "200": {
+            "description": "PNG",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No QR pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

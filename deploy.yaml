@@ -1,112 +1,43 @@
 # =============================================================================
-# WhatsApp API Gateway — Kubernetes deployment
+# WhatsApp API Gateway 2.x (Go, whatsmeow) — Kubernetes deployment
 # -----------------------------------------------------------------------------
-# Apply with:   kubectl apply -f deploy.yaml -n k2-system
-# (create the namespace once: kubectl create namespace k2-system)
+# Applied by Jenkins "whatsapp_reader Deploy": envsubst (NAMESPACE, SERVICE_NAME, REPOSITORY, HOST,
+# BASE_PATH, IMAGE_TAG) + kubectl apply.
 #
-# Notes:
-#   * Single replica per instance — whatsapp-web.js keeps a LocalAuth session and a
-#     headless-Chrome process that cannot be shared across pods.
-#   * Several instances (one Deployment each, distinct ${SERVICE_NAME}) may share the
-#     whatsapp-data PVC: every instance mounts it with subPath ${SERVICE_NAME}, so each
-#     sees only its own folder of the volume and their sessions never touch. While the
-#     PVC is ReadWriteOnce all instances must land on the same node.
-#   * The session is persisted on the PVC; losing it forces a new QR login.
-#   * /health is unauthenticated so probes work without a token.
+# What changed from 1.x:
+#   * No browser and no volume. The WhatsApp session, the idempotency keys, the message cache and the
+#     outbox of RabbitMQ events live in Postgres (pg-whatsapp, role/schema wa_reader). The pod can
+#     start on any node; nothing has to be moved or replicated. The old whatsapp-data-lh claim is no
+#     longer described here — kubectl apply (no --prune) leaves it; delete it by hand once 2.x is
+#     settled and 1.x will not be rolled back to (rolling back needs that volume: 1.x's session).
+#   * DATABASE_URL comes from Secret wa-reader-db, made by ~/k2-security/pg-roles/wa-reader-pg-whatsapp.sh
+#     on master (with the pg-whatsapp CA in ConfigMap pg-whatsapp-ca and NetworkPolicy
+#     database/allow-wa-reader-to-pg-whatsapp). It points straight at pg-whatsapp-rw, NOT pgbouncer:
+#     the single-owner lock is a session advisory lock.
+#   * Only the owner of that lock connects WhatsApp; readiness (/health/owner) is true only there, so
+#     the Service never sends traffic to a replica that does not hold the session.
+#   * Memory: ~10–30 MiB in use (was 2–4 GiB with Chromium).
 # =============================================================================
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  # Per-instance: each ${SERVICE_NAME} carries its own config, so two instances may
-  # differ in client id, allowlist or pinned WA Web build without touching each other.
   name: ${SERVICE_NAME}-config
   namespace: ${NAMESPACE}
 data:
   PORT: "3000"
-  NODE_ENV: "production"
-  # Keycloak only over TLS (realm k2: sslRequired=all) and through the ingress, so the issuer
-  # built from it ("{URL}/realms/k2") equals the "iss" of real tokens. The k2 root CA comes from the
-  # base image (NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt).
-  KEYCLOAK_AUTH_SERVER_URL: "https://auth.infrastructure.kub.k2.lan"
-  KEYCLOAK_REALM: "k2"
   PATH_BASE: ${BASE_PATH}
+  LOG_LEVEL: "info"
+  # Names the session (and its owner lock). Two instances with different ids keep separate devices.
   WHATSAPP_CLIENT_ID: "default"
-  WHATSAPP_SESSION_PATH: "/app/data/sessions"
+  # Minimum gap between outbound messages (ban risk).
   WHATSAPP_MESSAGE_DELAY_MS: "3000"
-  PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
-  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-  # Node heap, kept well under the container memory limit so V8 GCs instead of the
-  # kernel OOM-killing the pod. Set here (envFrom wins over the image's ENV) so the
-  # heap can follow a limits change without rebuilding the image — keep the two in
-  # step: roughly half of resources.limits.memory, leaving the rest for the
-  # Chromium renderer's native memory, which lives outside this heap.
-  NODE_OPTIONS: "--max-old-space-size=2048"
-  # Ceiling on the Chromium RENDERER's JS heap (the Node heap is NODE_OPTIONS above). The
-  # renderer is also where WhatsApp Web decodes and re-encodes an outgoing photo, and a heap
-  # too small for that makes the prep give up quietly: it returns no filehash and the send dies
-  # inside WhatsApp's own bundle. Check with GET /health/media-prep?pixels=2048 before raising
-  # it, and keep it well under resources.limits.memory. 0 leaves the renderer uncapped.
-  WHATSAPP_RENDERER_HEAP_MB: "256"
-  WHATSAPP_READY_TIMEOUT_MS: "180000"
-  WHATSAPP_RECONCILE_MAX_FAILURES: "3"
-  WHATSAPP_RECONCILE_BACKOFF_MAX_MS: "900000"
-  # On start, scroll each chat back to the last message it processed (at most 2 days) and
-  # forward what was missed while the pod was down. "false" starts clean from the current moment.
-  WHATSAPP_BACKFILL_ON_START: "true"
-  # Pinning the WhatsApp Web build the session loads. Leave unset and whatsapp-web.js asks for
-  # its own default build; that build is long gone from wa-version, so its cache quietly falls
-  # back to whatever WhatsApp serves today — and the day WhatsApp changes the internals the
-  # injected helpers use, getChats and friends start throwing minified errors.
-  #
-  # Pin it to the build a session was last seen working on. After a deploy the gateway logs
-  # "WhatsApp Web version in use" on ready; take the version from there, confirm the file
-  # exists under https://github.com/wppconnect-team/wa-version/tree/main/html and set it here.
-  # Unset it again to fall back to the library default if a pinned build stops loading.
-  #
-  # Pinned on 2026-09-17 because the build WhatsApp serves has slimmed MsgKey down to
-  # {fromMe, remote, id, participant}: the from, to, selfDir and _serialized the library fills
-  # in and reads back are simply gone, so every send builds a key WhatsApp cannot index and
-  # dies in its own bundle on "Data passed to getter must include an id property". The media
-  # is fine and even reaches WhatsApp's servers first, which is what made this look like an
-  # attachment problem for a day. This build is from 2026-07-25, two weeks after
-  # whatsapp-web.js 1.34.7, and still has the old key. Bump it when the library is upgraded.
-  # Left unset: pinning no longer holds. The pinned index loads (the gateway logs the download
-  # and serves it from disk) and WhatsApp Web then updates itself past it — "version in use" came
-  # back as the current build every time. Keep the machinery; it costs nothing and the day a pin
-  # works again this is where it goes.
-  # WHATSAPP_WEB_VERSION: "2.3000.1043840091-alpha"
-  # The build's HTML is fetched once and kept here, on the session volume. If the cluster has no
-  # way out to raw.githubusercontent.com the gateway says so on startup, and the file can be put
-  # at <this path>/<version>.html by hand — the pin then holds with no egress at all.
-  WHATSAPP_WEB_VERSION_CACHE_PATH: "/app/data/web-versions"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  # Deliberately NOT ${SERVICE_NAME}-scoped: this is the one volume every instance
-  # shares; each instance claims its own folder on it via the mount's subPath.
-  name: whatsapp-data
-  namespace: ${NAMESPACE}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    # Shared by every instance (one subPath folder each): a LocalAuth session plus
-    # the idempotency store runs a few hundred MB per instance, and Chromium's
-    # profile cache grows on each WA Web reload.
-    # NOTE: keep this in step with the PVC that is already bound in the cluster.
-    # Raising it on an existing claim is rejected by the API server ("only
-    # dynamically provisioned pvc can be resized") unless the StorageClass sets
-    # allowVolumeExpansion — k3s's default local-path does not, and has no resizer
-    # at all, so the deploy fails on this one object while everything else applies.
-    # On local-path the number is nominal anyway: the volume is a plain directory
-    # on the node under no quota, so the sessions may (and do) outgrow it. To make
-    # it truthful, recreate the claim out of band — which drops the sessions and
-    # forces a fresh QR login unless the directory is carried over by hand.
-    requests:
-      storage: 1Gi
-  # storageClassName: "{{storage-class}}"   # uncomment / set if no default SC
+  # How the device shows on the phone under "Linked devices".
+  WHATSAPP_DEVICE_NAME: "K2 WhatsApp Gateway"
+  # Messages (for replies, edits, deletions, retries) and published events are kept this long.
+  WHATSAPP_HISTORY_RETENTION_SEC: "604800"
+  # Soft heap ceiling for the Go runtime, under resources.limits.memory.
+  GOMEMLIMIT: "200MiB"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -115,12 +46,11 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   replicas: 1
-  # Keep only the current ReplicaSet (plus one prior for rollback); avoids a
-  # pile-up of old 0-replica ReplicaSets from past deploys.
   revisionHistoryLimit: 1
   strategy:
-    # Recreate (not RollingUpdate): the PVC is RWO and the WhatsApp session is
-    # single-owner, so the old pod must stop before the new one starts.
+    # Recreate: the old pod releases the session (and the owner lock) before the new one connects.
+    # Even if two ever overlap (a node cut off from the network), the lock keeps the second one on
+    # standby until Postgres drops the first one's connection (~25 s, TCP keepalives on the lock).
     type: Recreate
   selector:
     matchLabels:
@@ -129,62 +59,37 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: ${SERVICE_NAME}
+        app.kubernetes.io/version: "2"
     spec:
-      # Allow time for a clean shutdown: SIGTERM -> close server, destroy the
-      # Chromium session, close RabbitMQ. A clean exit releases the Chromium
-      # SingletonLock on the PVC (the next start clears stale locks anyway).
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      # Any node will do now that there is no volume; the gpu node stays eligible as in 1.x, and a dead
+      # node is left after 30 s instead of 300.
+      tolerations:
+        - key: k2.arckos.net/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       securityContext:
-        # node user (uid 1000) from the base image must own the mounted volume.
-        fsGroup: 1000
         runAsNonRoot: true
-        runAsUser: 1000
+        runAsUser: 1001
+        runAsGroup: 1001
         seccompProfile:
           type: RuntimeDefault
-      # kubelet creates a missing subPath directory as root:root, and fsGroup does not
-      # reliably reach through a subPath mount — so the instance's folder is prepared
-      # here, on the volume root, before the app container ever mounts it.
-      initContainers:
-        - name: prepare-data-dir
-          image: "${REPOSITORY}:${IMAGE_TAG}"
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - mkdir -p "/volume/${SERVICE_NAME}" && chown -R 1000:1000 "/volume/${SERVICE_NAME}"
-          securityContext:
-            # The one container allowed to be root: it exists to hand the folder to uid 1000.
-            runAsNonRoot: false
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-              add:
-                - CHOWN
-                - DAC_OVERRIDE
-          # Tiny, but set: without them the pod is BestEffort while this container runs.
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "100m"
-              memory: "128Mi"
-          volumeMounts:
-            # The volume ROOT, deliberately without subPath — the folder is made from outside.
-            - name: data
-              mountPath: /volume
       containers:
         - name: ${SERVICE_NAME}
-          # Built from this repo's Dockerfile and pushed to your registry.
-          # NOTE: with a mutable tag (e.g. "latest") IfNotPresent will NOT pull a
-          # freshly pushed image — use an immutable tag (git sha) per deploy.
           image: "${REPOSITORY}:${IMAGE_TAG}"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
-            # Chromium runs with --no-sandbox, so it needs no Linux capabilities.
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
@@ -194,74 +99,56 @@ spec:
           envFrom:
             - configMapRef:
                 name: ${SERVICE_NAME}-config
+            # RABBITMQ_CHAT_IDS — the forward allowlist (shared with 1.x, unchanged).
             - configMapRef:
                 name: whatsapp-to-rabbit-config
+            # RABBITMQ_EXCHANGE.
             - configMapRef:
                 name: rabbitmq-config
+            # RABBITMQ_URL (own account). Optional: without it events wait in the outbox, none are lost.
+            - secretRef:
+                name: ${SERVICE_NAME}-rabbit-secret
+                optional: true
+            # DATABASE_URL. Required: the pod does not start without it (the session lives there).
+            - secretRef:
+                name: ${SERVICE_NAME}-db
           volumeMounts:
-            # The PVC is shared between instances; subPath keeps each one inside its own
-            # folder of the volume while the container keeps seeing plain /app/data — so
-            # WHATSAPP_SESSION_PATH and the idempotency store need no per-instance values.
-            - name: data
-              mountPath: /app/data
-              subPath: ${SERVICE_NAME}
-            # Chromium's default /dev/shm in a container is 64Mi; the renderer runs out
-            # of it and dies mid-session ("Target closed"). This replaces it with a 1Gi
-            # tmpfs — but note whatsappService.ts currently passes
-            # --disable-dev-shm-usage, which sends that traffic to /tmp instead, so the
-            # mount only starts paying off once that flag is dropped.
-            - name: dshm
-              mountPath: /dev/shm
-          # Give the WhatsApp client time to connect / wait for QR login before
-          # liveness starts killing the pod.
+            - name: pg-ca
+              mountPath: /etc/pg-ca
+              readOnly: true
           startupProbe:
             httpGet:
               path: /health
               port: http
-            periodSeconds: 10
-            failureThreshold: 30   # up to ~5 min for first-time login
+            periodSeconds: 2
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            periodSeconds: 30
+            periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
-          # Readiness is /health, not /ready: the pod must take traffic while
-          # WhatsApp is logged out, or nobody can reach Swagger, /qr or
-          # /session/login to log it in (single replica, RWO volume — there is
-          # no other pod to fall back to). Endpoints that need a session answer
-          # 503 WA_NOT_LOGGED_IN / WA_NOT_READY on their own; /ready still
-          # reports whether the session can send, for monitoring.
+          # Ready only on the session owner — logged in or not, so Swagger, /qr and /session/login are
+          # reachable to log it in. /ready still says whether the session can send, for monitoring.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/owner
               port: http
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
           resources:
             requests:
-              cpu: "500m"
-              memory: "2Gi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              # headless Chrome is memory-hungry and grows as WA Web reloads;
-              # 1Gi, then 2Gi, were too tight and caused OOMKilled (137). Node heap is
-              # capped at 2048Mi (NODE_OPTIONS in the ConfigMap) below this so V8 GCs
-              # instead of OOMing, leaving headroom for the Chromium renderer's native
-              # memory and for the memory-backed /dev/shm, which also counts here.
-              cpu: "2000m"
-              memory: "4Gi"
+              cpu: "1000m"
+              memory: "256Mi"
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: whatsapp-data
-        - name: dshm
-          emptyDir:
-            # tmpfs — pages actually used count against the container memory limit
-            # above, so sizeLimit is a ceiling, not a reservation.
-            medium: Memory
-            sizeLimit: 1Gi
+        - name: pg-ca
+          configMap:
+            name: pg-whatsapp-ca
 ---
 apiVersion: v1
 kind: Service
@@ -277,9 +164,8 @@ spec:
       port: 3000
       targetPort: http
 ---
-# Optional: external access for QR login (/whatsapp-api/qr) and Swagger
-# (/whatsapp-api/docs). The web-server reaches the gateway in-cluster via the
-# Service above (http://whatsapp-api:3000) and does NOT need this Ingress.
+# External access: QR login (${BASE_PATH}/qr), Swagger (${BASE_PATH}/docs) and the API for callers
+# outside the cluster. In-cluster callers use the Service above.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
