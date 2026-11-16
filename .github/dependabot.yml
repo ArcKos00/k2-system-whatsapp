@@ -1,8 +1,9 @@
 # Dependabot: weekly version updates (minor+patch grouped, majors one by one) + security updates.
-# Internal packages/images (Nexus 10.20.50.25:8081 / k2:8081) are not reachable from GitHub and are skipped.
+# Internal images (Nexus 10.20.50.25:8081) are not reachable from GitHub: the Dockerfile's FROM lines
+# go through ${REGISTRY}, so Dependabot only sees the Go modules and the Actions.
 version: 2
 updates:
-  - package-ecosystem: "npm"
+  - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -10,10 +11,18 @@ updates:
       time: "06:00"
       timezone: "Europe/Kyiv"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: "deps"
     groups:
-      npm-minor-patch:
+      go-minor-patch:
         update-types: ["minor", "patch"]
-    ignore:
-      - dependency-name: "@k2/*"   # internal Nexus (k2:8081) — out of reach for GitHub
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "ci"

@@ -1,60 +1,37 @@
-# ─── Build stage ───────────────────────────────────────────────
-FROM 10.20.50.25:8081/node:26-bookworm-slim AS build
-WORKDIR /app
+# WhatsApp API Gateway 2.x — Go (whatsmeow), no browser.
+# Image rules: ~/warspace/docs/docker.md (BuildKit, every FROM through Nexus, dependency layer before code,
+# cache mounts, smallest runtime, K2 roots in the trust store, files root-owned, process uid 1001).
+ARG REGISTRY=10.20.50.25:8081
+ARG GO_VERSION=1.27.4
 
-# Don't download Chromium during build — the base image provides it.
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# K2 roots ship in the full Nexus node image (/usr/local/share/ca-certificates/*.crt).
+FROM ${REGISTRY}/node:26 AS k2ca
 
-COPY package*.json ./
-RUN npm ci
+FROM ${REGISTRY}/golang:${GO_VERSION}-alpine AS build
+WORKDIR /src
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
+COPY VERSION ./
+COPY cmd ./cmd
+COPY internal ./internal
+# Unit tests gate the image (integration tests need Postgres/RabbitMQ and run with -tags integration).
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked --mount=type=cache,target=/root/.cache/go-build \
+    go vet ./... && go test ./... \
+    && go build -trimpath -ldflags "-s -w -X main.Version=$(cat VERSION)" -o /out/wa-reader ./cmd/wa-reader
+# Public roots of the build image + K2 roots, one bundle (Go reads /etc/ssl/certs/ca-certificates.crt).
+COPY --from=k2ca /usr/local/share/ca-certificates/ /k2-ca/
+RUN { cat /etc/ssl/certs/ca-certificates.crt; for f in /k2-ca/*.crt; do echo; cat "$f"; done; } > /out/ca-certificates.crt
 
-COPY . .
-# Generates src/generated/{routes.ts,swagger.json} then compiles to dist/.
-RUN npm run build
-
-# Drop dev dependencies for the runtime image.
-RUN npm prune --omit=dev
-
-# ─── Runtime stage ─────────────────────────────────────────────
-FROM 10.20.50.25:8081/node:26-bookworm-slim AS runtime
-WORKDIR /app
-
-# The Nexus base (Chromium, tini, K2 CA) is rebuilt rarely, while the Jenkins
-# Trivy gate blocks CRITICALs that already have a fix. Pull Debian security
-# updates (chromium, perl-base, libbrotli, ...). The job builds with --pull and layer cache, so this
-# layer is reused until the base changes or BASE_REFRESH does: Jenkins passes the week number
-# (--build-arg BASE_REFRESH="$(date +%G-W%V)"), so it is rebuilt with fresh patches once a week.
+FROM ${REGISTRY}/alpine:3.23 AS runtime
+# Jenkins passes the ISO week (--build-arg BASE_REFRESH="$(date +%G-W%V)") so security updates of the
+# base land once a week while the layer is cached in between; the Trivy gate blocks fixable CRITICALs.
 ARG BASE_REFRESH=none
-RUN echo "base refresh: ${BASE_REFRESH}" \
-    && apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# Cap the Node heap well below the container memory limit (2Gi) so V8 GCs
-# instead of being OOM-killed; the headless Chromium that whatsapp-web.js
-# spawns lives outside this heap, so leave it ample headroom.
-ENV NODE_ENV=production \
-    WHATSAPP_SESSION_PATH=/app/data/sessions \
-    NODE_OPTIONS=--max-old-space-size=1024
-
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/package.json ./package.json
-
-# Persisted WhatsApp session lives here — mount a volume to keep it.
-# Code and node_modules stay root-owned (read-only for the process); only what the app writes belongs to
-# node: the data volume and whatsapp-web.js's .wwebjs_cache, which it creates in the working directory.
-# (chown -R /app used to copy all of node_modules into a ~40 MB layer of its own.)
-RUN mkdir -p /app/data/sessions /app/.wwebjs_cache \
-    && chown node:node /app/data /app/data/sessions /app/.wwebjs_cache
-VOLUME ["/app/data"]
-
-# Run as the non-root user that the node image ships with.
-USER node
-
+RUN echo "base refresh: ${BASE_REFRESH}" && apk upgrade --no-cache
+COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/wa-reader /usr/local/bin/wa-reader
+USER 1001:1001
 EXPOSE 3000
-
-# tini (from the base image) reaps the headless-Chrome processes Puppeteer
-# spawns and forwards SIGTERM (sent by Kubernetes on pod shutdown) to Node.
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/server.js"]
+ENV PORT=3000
+# Go handles SIGTERM itself (graceful shutdown, session closed, owner lock released): no init needed.
+ENTRYPOINT ["/usr/local/bin/wa-reader"]

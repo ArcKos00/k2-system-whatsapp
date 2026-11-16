@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 15
     env:
       SEMGREP_IMAGE: docker.io/semgrep/semgrep:1.182.1@sha256:451b3d875c00dac7ed5db5293e584a07de11449a409c10b3c2d2652f429630b6
-      SEMGREP_CONFIGS: p/default p/secrets p/dockerfile p/github-actions p/javascript p/typescript p/nodejs
+      SEMGREP_CONFIGS: p/default p/secrets p/dockerfile p/github-actions p/golang p/gosec
       SEMGREP_BLOCK: 'true'
     steps:
       - uses: actions/checkout@v4

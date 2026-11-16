@@ -1,396 +1,100 @@
 # WhatsApp API Gateway
 
-REST API gateway over [`whatsapp-web.js`](https://github.com/pedroslopez/whatsapp-web.js).
-Built with **TypeScript + Express + tsoa**, secured with **Keycloak** (bearer JWT),
-documented with **Swagger UI**, and DI via **tsyringe**.
+REST gateway over WhatsApp for K2: send messages and files, list chats, and publish inbound
+messages to RabbitMQ. Since **2.0.0** it is written in Go on [whatsmeow](https://github.com/tulir/whatsmeow):
+the gateway is a linked device speaking WhatsApp's own protocol over a websocket — no browser,
+no Puppeteer, no WhatsApp Web build to pin.
 
-## Features
+| | 1.x (whatsapp-web.js) | 2.x (whatsmeow) |
+|---|---|---|
+| Runtime | Node + headless Chromium | one static Go binary |
+| Image | ~430 MB | ~55 MB |
+| Memory | 2–4 GiB limit, OOMs | ~10–30 MiB |
+| Session | LocalAuth on a RWO volume | Postgres (`whatsmeow_*` tables) |
+| Inbound delivery | reconcile scan, ≤ 1000 messages / chat after a restart | outbox in Postgres, written before WhatsApp's ack |
+| Breaks when WhatsApp Web changes | yes (`messageId`, media prep, `getChats`) | no |
 
-- `POST /messages/send` — send text + base64 attachments to a phone number (JSON).
-- `POST /messages/send-with-files` — send text + uploaded files to a phone number (multipart).
-- `POST /messages/chat/send` — same, addressed by chat id instead of number (JSON).
-  The only way to reach a **group**.
-- `POST /messages/chat/send-with-files` — same, multipart.
-- `GET /chats` — list every chat with its id and the fullest description WhatsApp will give.
-- `GET /health` — liveness/readiness (unauthenticated).
-- `GET /qr` — login QR as a PNG while authentication is pending (404 once linked).
-- `GET /session` — session state; `POST /session/login` — start a session and wait for its QR;
-  `POST /session/logout` — unlink the device and drop the local session (stays logged out until
-  the next login); `GET /session/qr` — 302 redirect to `/qr` while a QR is pending.
-- The HTTP server, Swagger and the session endpoints come up without a logged-in WhatsApp (and
-  without RabbitMQ). Endpoints that need a session answer `503` with `WA_NOT_LOGGED_IN` (no
-  account linked: log in) or `WA_NOT_READY` (linked, still connecting).
-- `GET /docs` — Swagger UI; `GET /openapi.json` — raw spec.
-- WhatsApp session persisted via `LocalAuth` (QR printed to console on first run).
-- Per-message throttle to reduce ban risk.
-- Keycloak JWT validation against the realm JWKS (RS256), optional role checks.
+## API (unchanged from 1.x)
 
-## Project structure
+Swagger UI at **`GET /docs`**, raw spec at `GET /openapi.json` (both honour `PATH_BASE`).
 
-```
-.
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── package.json
-├── tsconfig.json
-├── tsoa.json                     # tsoa spec + routes config
-└── src
-    ├── server.ts                 # entry point: init WhatsApp, then listen
-    ├── app.ts                    # Express app: swagger, routes, error handling
-    ├── ioc.ts                    # tsoa ↔ tsyringe DI bridge
-    ├── config/env.ts             # typed env config
-    ├── controllers/
-    │   ├── messagesController.ts     # @Route('messages')      — send by phone number
-    │   ├── chatMessagesController.ts # @Route('messages/chat') — send by chat id
-    │   ├── chatsController.ts        # @Route('chats')         — list chats
-    │   └── healthController.ts
-    ├── services/
-    │   ├── whatsappService.ts        # initClient(), sendMessage(), listChatSummaries()
-    │   └── idempotentSend.ts         # shared idempotency-key handling for every send
-    ├── dtos/                         # request/response DTOs (drive the OpenAPI spec)
-    ├── middleware/
-    │   ├── authentication.ts     # expressAuthentication() — Keycloak JWT
-    │   └── errorHandler.ts
-    ├── errors/appErrors.ts
-    ├── utils/logger.ts
-    └── generated/                # tsoa output (git-ignored): routes.ts, swagger.json
-```
+- `POST /messages/send`, `POST /messages/send-with-files` — to a phone number (JSON with base64 files / multipart).
+- `POST /messages/chat/send`, `POST /messages/chat/send-with-files` — to a chat id; the only way to reach a group.
+  `quotedMessageId` sends a reply; `idempotencyKey` makes a retry safe (200 `deduplicated` replay, 409 while in flight).
+- `GET /chats` — chat ids (`@g.us`, `@c.us`, `@lid`, `@newsletter`, `status@broadcast`) with names and whether the
+  forward allowlist takes them.
+- `GET /health` (liveness, always 200), `GET /health/owner` (readiness: 200 on the replica that owns the session),
+  `GET /ready` (200 only when a send can go out).
+- Session: `GET /session`, `POST /session/login`, `POST /session/logout`, `GET /session/qr` (302 → `GET /qr`, PNG),
+  and new in 2.0 `POST /session/pair-code` `{phoneNumber}` — link with an 8-character code typed on the phone.
 
-## Getting started
+Paths, bodies, status codes and error codes (`WA_NOT_LOGGED_IN`, `WA_NOT_READY`, `WA_CHAT_ID_INVALID`,
+`WA_CHAT_NOT_FOUND`, `WA_NUMBER_NOT_FOUND`, `WA_SEND_FAILED`, `WA_SEND_IN_FLIGHT`, `BAD_ATTACHMENT`,
+`VALIDATION_ERROR`) are those of 1.x. Ids keep the whatsapp-web.js spelling: one-to-one chats are `<number>@c.us`
+(`@s.whatsapp.net` is accepted), message ids are `<fromMe>_<chat>_<id>[_<participant>]`. A `quotedMessageId`
+this gateway has never seen (for instance one recorded by 1.x) is sent unquoted, as 1.x did with one WhatsApp
+could not find.
 
-```bash
-npm install
-cp .env.example .env          # fill in Keycloak settings
-npm run tsoa                  # generate src/generated/{routes.ts,swagger.json}
-npm run dev                   # tsc + nodemon (auto-runs tsoa first)
-```
+No endpoint requires a token: keep the gateway on the internal network.
 
-On first run, no WhatsApp session exists. The HTTP server starts immediately and
-WhatsApp connects in the background, so you can grab the login QR three ways:
+## RabbitMQ events (unchanged from 1.x)
 
-- open **`GET /qr`** in a browser (PNG, perfectly square) — recommended;
-- open the PNG file written to `<WHATSAPP_SESSION_PATH>/qr.png`;
-- read the ASCII QR from the console/logs.
+Durable **headers** exchange `RABBITMQ_EXCHANGE`, headers `chatId` and `event`, JSON body:
 
-Scan it from WhatsApp ▸ Linked devices. The session is then saved under
-`WHATSAPP_SESSION_PATH` and reused on subsequent restarts (`/qr` returns 404 once
-linked).
+| `event` | when | extra fields | AMQP `messageId` |
+|---|---|---|---|
+| `created` | a new inbound message | — | `<id>` |
+| `edited` | the sender edited it | `body` (new), `previousBody`, `editedAt` | `<id>:edited:<editedAtMs>` |
+| `deleted` | deleted for everyone | `body`/`type` of the original, `deletedAt` | `<id>:deleted` |
 
-> Important: `app.ts` imports `./generated/routes` and `./generated/swagger.json`,
-> which are produced by tsoa. Always run `npm run tsoa` (the `build`/`dev`
-> scripts do this automatically) before `tsc`/start, otherwise compilation fails.
+Common fields: `event, id, chatId, from, author (groups and status), body, type, timestamp, hasMedia`. `type`
+uses the whatsapp-web.js names (`chat`, `image`, `video`, `audio`, `ptt`, `document`, `sticker`, `location`,
+`vcard`, `poll_creation`, …). Only `RABBITMQ_CHAT_IDS` chats are published (empty = all). Messages the account
+itself sends are not published, as in 1.x.
 
-## Build & run (production)
+**Delivery is at-least-once and lossless.** The message and the event owed for it are written to Postgres in one
+transaction *before* WhatsApp is acked (whatsmeow `SynchronousAck`); a pump publishes the outbox in order with
+publisher confirms and marks each event only once the broker has confirmed it. A broker outage, a missing
+`RABBITMQ_URL` or a restart delays events, never drops them. While the gateway is down, WhatsApp keeps the
+messages for the linked device and delivers them on reconnect; there is no per-chat cap.
 
-```bash
-npm run build     # tsoa spec-and-routes && tsc  ->  dist/
-npm start         # node dist/server.js
-```
+## Running several replicas
 
-## Docker
+Only one process may drive a WhatsApp device (a second connection replaces the first). Every replica serves HTTP,
+but only the holder of a Postgres **session advisory lock** (keyed by `WHATSAPP_CLIENT_ID`) connects WhatsApp and
+drains the outbox; readiness is true only there. When the owner stops, a standby takes over in about a second
+(measured: 1.1 s). This is why `DATABASE_URL` must reach Postgres directly, not through pgbouncer in transaction mode.
+
+## Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `DATABASE_URL` | — (required) | Postgres DSN; tables go to the role's `search_path` |
+| `PORT`, `PATH_BASE`, `LOG_LEVEL` | `3000`, `""`, `info` | `PATH_BASE` is stripped like ASP.NET `UsePathBase` |
+| `WHATSAPP_CLIENT_ID` | `default` | names the session and its owner lock |
+| `WHATSAPP_MESSAGE_DELAY_MS` | `3000` | minimum gap between outbound messages |
+| `WHATSAPP_LOGIN_WAIT_MS` | `60000` | how long `POST /session/login` waits for a QR |
+| `WHATSAPP_DEVICE_NAME` | `K2 WhatsApp Gateway` | shown on the phone under Linked devices |
+| `WHATSAPP_HISTORY_RETENTION_SEC` | `604800` | messages and published events are kept this long |
+| `IDEMPOTENCY_TTL_MS`, `IDEMPOTENCY_IN_FLIGHT_TIMEOUT_MS` | 7 d, 5 min | key lifetime; when an unfinished claim is taken over |
+| `RABBITMQ_URL`, `RABBITMQ_EXCHANGE`, `RABBITMQ_CHAT_IDS` | —, `whatsapp.messages`, all | unset URL = events wait in the outbox |
+| `RABBITMQ_RECONNECT_DELAY_MS`, `RABBITMQ_CONNECT_TIMEOUT_MS`, `RABBITMQ_PUBLISH_BATCH` | 5000, 10000, 100 | |
+
+1.x variables for Chromium, Puppeteer, the WhatsApp Web build, reconcile and backfill are ignored.
+
+## Development
 
 ```bash
-docker compose up --build
+go test ./...                                   # unit tests
+WA_TEST_DATABASE_URL=postgres://wa_reader:…@localhost:5432/whatsapp \
+WA_TEST_RABBITMQ_URL=amqp://guest:guest@localhost:5672/ \
+  go test -race -tags integration ./...         # + outbox, owner lock, idempotency against real services
+DATABASE_URL=postgres://… go run ./cmd/wa-reader  # then open /qr and scan it
+docker build --add-host k2:10.20.50.25 --pull -t wa-reader .
 ```
 
-The image installs Chromium and points Puppeteer at it
-(`PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`). The WhatsApp session is
-persisted in the `whatsapp-data` volume mounted at `/app/data`.
+Layout: `cmd/wa-reader` (start order, shutdown), `internal/api` (REST, OpenAPI, Swagger UI embedded),
+`internal/wa` (whatsmeow session, inbound, sends, chats), `internal/store` (Postgres: migrations, outbox, cache,
+idempotency, owner lock), `internal/rabbit` (outbox pump), `internal/ids` (1.x id dialect).
 
-To scan the QR on first launch, watch the container logs:
-
-```bash
-docker compose logs -f whatsapp-api
-```
-
-## Kubernetes / ingress sub-path (`PATH_BASE`)
-
-When the service is exposed under a sub-path (e.g. `https://host/whatsapp-api`),
-set `PATH_BASE=/whatsapp-api`. An ASP.NET-style `UsePathBase` middleware strips
-that prefix from incoming requests, so:
-
-- through the ingress, `/whatsapp-api/messages/send` routes correctly;
-- direct in-cluster probes hitting the pod on `/health` (no prefix) still work;
-- Swagger UI assets resolve relatively, and the spec's `servers` is set to the
-  base path so "Try it out" targets the right URL.
-
-No ingress path rewrite is required — forward the full path to the pod. Point
-the Kubernetes probes at the pod directly (no prefix needed):
-
-```yaml
-livenessProbe:
-  httpGet: { path: /health, port: 3000 }
-readinessProbe:
-  httpGet: { path: /health, port: 3000 }
-```
-
-Persist the WhatsApp session with a `PersistentVolumeClaim` mounted at
-`/app/data` (matches `WHATSAPP_SESSION_PATH=/app/data/sessions`).
-
-## Authentication
-
-No endpoint is protected right now (`@Security` is commented out on the
-controllers), so `KEYCLOAK_AUTH_SERVER_URL` / `KEYCLOAK_REALM` are optional and
-are not set in `deploy.yaml`. Once `@Security('keycloak')` is enabled, both must be
-set: tokens are validated against `"{KEYCLOAK_AUTH_SERVER_URL}/realms/{KEYCLOAK_REALM}"`
-using the realm JWKS, and without them every protected request gets 401.
-`iss` must match exactly, so use the same public Keycloak URL that issues the
-tokens, not the in-cluster `keycloak.infrastructure.svc` address. To require a
-specific role, change the decorator, e.g.:
-
-```ts
-@Security('keycloak', ['whatsapp:send'])
-```
-
-## Example requests
-
-JSON (text only):
-
-```bash
-curl -X POST http://localhost:3000/messages/send \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{ "phoneNumber": "380501234567", "message": "Привіт!" }'
-```
-
-JSON with a base64 file:
-
-```bash
-curl -X POST http://localhost:3000/messages/send \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{ "phoneNumber":"380501234567", "message":"Рахунок",
-        "files":[{"filename":"invoice.pdf","mimetype":"application/pdf","base64":"JVBERi0x..."}] }'
-```
-
-Multipart upload:
-
-```bash
-curl -X POST http://localhost:3000/messages/send-with-files \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "phoneNumber=380501234567" \
-  -F "message=Документи" \
-  -F "files=@./invoice.pdf" \
-  -F "files=@./photo.jpg"
-```
-
-### Sending to a chat id (groups)
-
-A group has no phone number, so `/messages/send` cannot address one. Take the `id` from
-`GET /chats` and post it to `/messages/chat/send`, which is otherwise identical — same
-throttle, same attachments, same `idempotencyKey`:
-
-```bash
-curl -X POST http://localhost:3000/messages/chat/send \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{ "chatId": "120363412778233770@g.us", "message": "Привіт, команда!" }'
-```
-
-```bash
-curl -X POST http://localhost:3000/messages/chat/send-with-files \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "chatId=120363412778233770@g.us" \
-  -F "message=Документи" \
-  -F "files=@./invoice.pdf"
-```
-
-`chatId` takes the ids exactly as the listing reports them — `@g.us` (group), `@c.us`
-(one-to-one), `@lid` (linked identity), `@newsletter` (channel). A bare number is read as
-`<number>@c.us` and a bare `<a>-<b>` as `<a>-<b>@g.us`, so an id copied without its suffix
-still works. A malformed id returns `422 WA_CHAT_ID_INVALID`; a well-formed id the linked
-account cannot see returns `404 WA_CHAT_NOT_FOUND`.
-
-### Replying to a message
-
-Every send answers with `messageId`, WhatsApp's id of the first message it dispatched (a replay
-by `idempotencyKey` answers with the original's). Pass it as `quotedMessageId` to
-`/messages/chat/send` to send a reply:
-
-```bash
-curl -X POST http://localhost:3000/messages/chat/send \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{ "chatId": "120363412778233770@g.us", "message": "Дякую!",
-        "quotedMessageId": "true_120363412778233770@g.us_3EB0C767D26A8B0F1E2A_380501234567@c.us" }'
-```
-
-The message counts for more than the quote, so it always goes out: a quoted message WhatsApp can
-no longer find, a chat with no replies (a channel, a status) or a quote that throws inside
-WhatsApp Web's internals (logged as `Quoted send failed`) all send it unquoted. `messageId` is
-optional in the answer, since WhatsApp does not always report one, and sends recorded before ids
-were kept replay without it.
-
-## Notes on reliability / anti-ban
-
-- Photos, videos and audio (`image/jpeg`, `image/png`, `image/webp`, `video/mp4`,
-  `video/3gpp`, `audio/*`) are sent as inline media so they render as a picture or a
-  player. If WhatsApp rejects the inline upload — an oversized image, an unsupported
-  codec — the same file is re-sent as a document. Everything else (PDF, Office, GIF,
-  archives…) is sent as a document from the start. A generic `application/octet-stream`
-  mimetype is replaced by the type implied by the file extension.
-- An attachment's first bytes have the final say over its type. A file whose content does not
-  match its name — a video or an HTML error page saved as `.jpeg` — is sent under the type the
-  content implies, because WhatsApp Web decodes photos and videos in the page before uploading
-  and a mislabelled one breaks that prep instead of being refused.
-- **Media sends and the `__x_id` collision.** `processMediaData` returns a MediaData model that
-  carries a private `__x_id`, and whatsapp-web.js spreads that model into the outgoing message,
-  where the field shadows the message's own id. The send is then built around a message with no
-  key, and WhatsApp throws `Data passed to getter must include an id property (it's how we
-  memoize) but got undefined` from `getValidatedSender` while initialising it. Only media sends
-  carry that field; text was never affected. Upstream fixes it by deleting the field
-  (wwebjs #201922, #201923); until that is released the gateway does the same in the page.
-  Worth remembering how this reads from the outside: the message names nothing, and the media
-  path is where the undefined lands, so it looks for a long time like a problem with the
-  attachments. It is not — the file preps, hashes and uploads to WhatsApp's servers cleanly.
-- An empty attachment returns `400 BAD_ATTACHMENT` and is never sent; the caller's retry policy
-  should treat it as final, since the same upload cannot succeed.
-- Every attachment is prepared by WhatsApp Web itself before the upload, and everything after
-  that step is keyed by the `filehash` the prep returns. A build that stops returning one takes
-  *every* media send down with WhatsApp's own minified
-  `Data passed to getter must include an id property (it's how we memoize) but got undefined`,
-  because the library hands the missing hash to an in-page getter. The gateway fills the hash in
-  itself when the prep omits it, and logs one `WhatsApp media prep` line per ready session saying
-  whether the prep is healthy, whether our hash is carrying it, or what the prep returned
-  instead. A send that still fails is reported as `502 WA_SEND_FAILED` naming the prep — it is
-  the build, not the file, so the fix is pinning `WHATSAPP_WEB_VERSION` (see below), and the
-  media must not be dropped in the meantime.
-- `GET /health/media-prep` runs that same check on demand and answers with what it found;
-  `?chatId=<id>` also resolves that chat, which is the one call every send makes before the
-  media path is even reached, and `?pixels=2048` preps a generated full-size photo instead of
-  the 8x8 one — the prep can be perfectly healthy on a thumbnail and give up on a real photo.
-  It sends nothing and needs no token.
-- `WHATSAPP_RENDERER_HEAP_MB` caps the Chromium renderer's JavaScript heap (256 by default, 0
-  to leave it uncapped). The renderer is where an outgoing photo is decoded and re-encoded, so a
-  ceiling that keeps idle memory down can also be what makes the prep give up on a full-size
-  image — if `?pixels=2048` fails and `?pixels=64` does not, raise this before suspecting the
-  build.
-- `WHATSAPP_MESSAGE_DELAY_MS` enforces a minimum gap between sends. Increase it
-  for bulk sending. WhatsApp may ban numbers that automate aggressively.
-- The number is validated with `getNumberId` before sending; unknown numbers
-  return `404 WA_NUMBER_NOT_FOUND`. A chat id is checked against the chats the account
-  actually has, and an unknown one returns `404 WA_CHAT_NOT_FOUND` (a `@c.us` id the
-  account has never talked to still falls back to the number check, since sending opens
-  that chat).
-- If the client is not connected, sends return `503 WA_NOT_READY`.
-
-### Pinning the WhatsApp Web build
-
-The library's injected helpers (`getChats`, message fetching, …) call into WhatsApp Web's own
-internal modules, so they only work against a build whose internals they still match. When the
-build moves out from under them, calls fail with minified page errors such as `r: r` thrown from
-`Client.getChats`, and no amount of restarting helps — the fresh session loads the same build.
-
-`WHATSAPP_WEB_VERSION` pins the build; `WHATSAPP_WEB_VERSION_REMOTE_PATH` overrides where the
-HTML comes from (by default the matching file in
-[wa-version](https://github.com/wppconnect-team/wa-version/tree/main/html)). Left unset,
-whatsapp-web.js requests its own default build, which is no longer published there, so its cache
-falls back to whatever WhatsApp serves today.
-
-To pin: read the `WhatsApp Web version in use` line the gateway logs when the session turns
-ready, check that `html/<version>.html` exists in wa-version, and set the variable to it. Unset
-it to go back to the library default if a pinned build stops loading, and expect to bump it when
-whatsapp-web.js is upgraded.
-
-Pinning was tried against this on 2026-09-17 and does not hold: the pinned index loads — the
-gateway downloads it, serves it from disk and logs both — and WhatsApp Web then updates itself
-past it, so `version in use` comes back as the current build anyway. The machinery stays because
-it costs nothing, and `version in use` is logged as an error when it disagrees with the pin, so a
-pin that silently does not take can never look like one that did.
-
-The break it was reached for turned out not to be a drift at all — see below. For the record,
-what the trail said along the way: The build WhatsApp was serving had
-slimmed `MsgKey` down to `{fromMe, remote, id, participant}` — the `from`, `to`, `selfDir` and
-`_serialized` the library fills in and reads back are gone — so every send built a key WhatsApp
-could not index and died on `Data passed to getter must include an id property`. Worth knowing
-for the next time: that error names nothing and surfaces wherever the undefined lands, and it
-took the media path down first, so it read for a day like a problem with the attachments. It was
-not. The file preps, hashes and uploads to WhatsApp's servers cleanly; the message built around
-it is what WhatsApp refuses. `GET /health/media-prep` exists to tell those two apart quickly,
-and a failing send now logs both account identities and a freshly built key beside the trace.
-
-### Finding chat ids for the forward allowlist
-
-`RABBITMQ_CHAT_IDS` keys on WhatsApp chat ids, which are not something you can read off the
-phone. `GET /chats` lists them:
-
-```bash
-curl -s https://<host>/whatsapp/chats | jq '.chats[] | {id, displayName, kind, forwarded}'
-```
-
-Groups end in `@g.us`, one-to-one chats in `@c.us`, linked-identity threads in `@lid`.
-`forwarded` says what the allowlist currently in force does with each chat, and `allowlist`
-echoes that configuration back. Chats WhatsApp would not let the library model come back as
-bare ids in `unreadableChatIds` — reconcile skips those too.
-
-#### How chats are described
-
-`whatsapp-web.js` exposes only `formattedTitle`, which WhatsApp leaves empty for exactly the
-chats that most need a name: a group whose metadata the account has not synced, and anyone who
-is not in the phone's address book. The listing therefore reads WhatsApp's own in-page chat
-models directly, in one page call, and pulls out everything they carry:
-
-| field | where it comes from |
-| --- | --- |
-| `subject`, `description`, `participantCount` | group metadata — this is what names an unnamed group |
-| `contactName`, `pushName`, `verifiedName`, `isMyContact` | the contact record behind a one-to-one chat |
-| `phoneNumber` | the contact's number; for a `@lid` thread, resolved through WhatsApp's own lid→number mapping |
-| `kind` | `group` / `private` / `lid` / `channel` / `broadcast`, read off the id |
-| `isReadOnly`, `archived`, `timestamp`, `unreadCount` | the chat model |
-
-`name` is the best of those, and `nameSource` says which one it is — so `number` means WhatsApp
-only had a phone number and `fallback` means it had nothing at all. `displayName` is never
-empty; it falls back to the id's user part. `unnamedCount` in the response counts how many
-chats ended up with no name.
-
-Any chat still nameless after the bulk read gets a second, per-chat pass: `getChatById` forces
-WhatsApp to fetch the group metadata, and `getContactById` asks for a contact it has not pushed
-to us. Those are round trips, so `WHATSAPP_CHAT_ENRICH_LIMIT` (default 250) caps how many one
-listing will do; anything past the cap is returned with its id only and logged as a warning.
-
-Without the endpoint the ids are also visible in the logs: every inbound message logs its
-`chatId`, whether it was forwarded or dropped by the allowlist.
-
-### Processed-message history and restart backfill
-
-Every message the gateway forwards is recorded, per chat, in
-`<WHATSAPP_SESSION_PATH>/processed-messages.json` (`WHATSAPP_HISTORY_PATH`) and kept for a week
-(`WHATSAPP_HISTORY_RETENTION_SEC`). Next to the ids each chat keeps an *anchor*: the newest message
-the chat is confirmed complete through. The anchor never moves past a message RabbitMQ has not
-confirmed, so a message still owed is always found again.
-
-Each reconcile pass — the one on `ready` included — scrolls every chat back until it reaches the
-anchor (doubling `WHATSAPP_CATCHUP_LIMIT_PER_CHAT` up to `WHATSAPP_BACKFILL_MAX_MESSAGES_PER_CHAT`)
-and forwards every later message not already in the history. That is how a restart picks up where
-the last process stopped, and the history is what keeps a rescan from publishing anything twice.
-
-- `WHATSAPP_BACKFILL_ON_START=true` (default): resume. A chat with no anchor yet resumes from the
-  last fully confirmed pass (or the legacy `cursor.json`, if one is still there).
-- `WHATSAPP_BACKFILL_ON_START=false`: start clean. Only messages that arrive after this start are
-  forwarded, whatever the history says.
-- Either way nothing older than `WHATSAPP_BACKFILL_MAX_AGE_SEC` (2 days) is ever forwarded. On a
-  first start with backfill on and no history at all, that means the last 2 days of every
-  forwarded chat.
-
-### Message events
-
-Every publish carries an `event` — in the JSON body and as an AMQP header of the same name — so a
-consumer can tell what happened to the message (or bind only to the events it handles):
-
-| `event`   | When                                   | Extra fields                                  | AMQP `messageId`          |
-|-----------|----------------------------------------|-----------------------------------------------|---------------------------|
-| `created` | a new inbound message (live or backfill) | —                                           | `<id>`                    |
-| `edited`  | the sender edited a message            | `body` (new text), `previousBody`, `editedAt` | `<id>:edited:<editedAtMs>` |
-| `deleted` | the sender deleted it for everyone     | `body`/`type` of the original if known, `deletedAt` | `<id>:deleted`      |
-
-`id` is always the original message's id, so `edited`/`deleted` refer back to the `created` one.
-Edits and deletions are forwarded live only: reconcile cannot see that an old message changed, so
-one that arrives while RabbitMQ is unavailable is logged and not retried. Messages deleted before
-they were ever forwarded are skipped by reconcile.
-
-### Reconcile back-off
-
-The reconcile loop republishes anything the live listener missed. `WHATSAPP_RECONCILE_MAX_FAILURES`
-consecutive failed passes restart the session; each restart also pauses scanning, starting at one
-`WHATSAPP_RECONCILE_INTERVAL_MS` and doubling per consecutive restart up to
-`WHATSAPP_RECONCILE_BACKOFF_MAX_MS` (15 min by default). A pass that succeeds clears the ladder.
-That way a fault a restart cannot fix — the version mismatch above, typically — costs an
-occasional retry instead of a restart every few passes.
+Version: `VERSION` (baked into the binary); release notes: `changelog/`.
